@@ -1,0 +1,61 @@
+{
+  "name": "dsh-ppt-studio",
+  "version": "0.10.0",
+  "description": "DSH PPT 工作室插件：简报（听众/场景/目标/时长）→ 叙事架构 → 页数分配 → 页面蓝图（样例关卡）→ 设计预设确认或模板复用后锁定 → 逐页生成（确定性校验 + 即时预览边看边调）→ 全册集成校验（依赖感知增量）→ HTML 所见即所得预览 + 可编辑 PPTX（pptxgenjs），按主题类型智能推荐视觉风格，场景驱动设计预设，生成进度可视化与暂停，批量查找替换与试错分支，支持中断恢复。",
+  "type": "module",
+  "main": "lib/index.js",
+  "types": "lib/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./lib/index.d.ts",
+      "default": "./lib/index.js"
+    },
+    "./skills/*": "./skills/*",
+    "./cordis.patch.yml": "./cordis.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib",
+    "skills",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "cli": "node lib/cli.js",
+    "demo": "npm run build && node lib/demo.js",
+    "preview": "node lib/preview-server.js"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  },
+  "keywords": [
+    "dsh",
+    "deepseek-harness",
+    "dsh-plugin",
+    "ppt",
+    "pptx",
+    "presentation",
+    "slides",
+    "preview"
+  ],
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.19"
+  },
+  "dependencies": {
+    "fflate": "^0.8.2",
+    "pptxgenjs": "^4.0.1",
+    "zod": "^3.24.0"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

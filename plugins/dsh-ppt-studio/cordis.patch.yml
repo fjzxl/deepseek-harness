@@ -1,0 +1,28 @@
+# dsh-ppt-studio：PPT 工作室插件（DeepSeek Harness 插件）。
+#
+# 安装即同时注册：
+#   1. 技能 dsh-ppt-studio（草稿框架 → 确认 → 逐章大纲 → 逐页生成 → 预览的完整 SOP）
+#   2. 工具 ppt_draft_create / ppt_themes / ppt_design_confirm / ppt_outline_build /
+#      ppt_section_outline / ppt_page_write / ppt_scene_check / ppt_deck_render /
+#      ppt_asset_register / ppt_image_generate / ppt_log_query / ppt_deck_status / ppt_doctor
+#
+# 插件自带空配置，绝不弄崩宿主启动；无需任何账号或密钥。可选配置：
+#
+#   - id: dsh-ppt-studio
+#     config:
+#       outputDir: E:\decks            # 可选：deck 工作区根目录，默认 <会话工作目录>/ppt-studio
+#       previewPort: 3170              # 可选：本地预览服务端口（预览也可由宿主静态托管时关闭）
+#       previewBaseUrl: http://127.0.0.1:3170  # 可选：生成预览链接时的前缀
+#       imageApi:                      # 可选：内网生图接口（OpenAI 兼容 /v1/images/generations）
+#         baseUrl: ''
+#         apiKeyEnv: PPT_STUDIO_IMAGE_API_KEY
+#         model: ''
+#
+# 对应环境变量：
+#   PPT_STUDIO_OUTPUT_DIR / PPT_STUDIO_PREVIEW_PORT / PPT_STUDIO_PREVIEW_BASE_URL
+#   PPT_STUDIO_IMAGE_API_BASE / PPT_STUDIO_IMAGE_API_KEY / PPT_STUDIO_IMAGE_API_MODEL
+#
+- insert:
+    - id: dsh-ppt-studio
+      name: dsh-ppt-studio
+      config: {}
