@@ -1,0 +1,19 @@
+# Build context for docker/Dockerfile (repo root). Workspace members stay in
+# the context because `pnpm install --frozen-lockfile` needs every package the
+# lockfile covers; only host-local build outputs, VCS state, and credentials go.
+.git
+**/.git
+**/node_modules
+**/lib
+**/dist
+**/dist-exe
+**/coverage
+**/.release
+**/*.tsbuildinfo
+
+# Never bake credentials or local state into image layers.
+.env
+**/.env
+.env.*
+docker-decks/
+*.log
