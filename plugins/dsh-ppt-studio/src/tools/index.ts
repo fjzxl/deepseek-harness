@@ -1,9 +1,10 @@
 /**
  * 组装全部 PPT 工具。
  *
- * 共 19 个工具，按流程顺序（阶段 0–8）：
+ * 共 20 个工具，按流程顺序（阶段 0–8）：
  *   ppt_brief_create →（对话中 ppt_themes）→ ppt_outline_draft → ppt_pageplan_confirm →
  *   ppt_section_draft → ppt_design_propose → ppt_design_lock → ppt_page_write →
+ *   （写页弱模型辅助：ppt_page_write content 内容模式 / ppt_page_skeleton 骨架 + append）→
  *   （每部分后可 ppt_preview_update；用户喊停 ppt_deck_pause）→ ppt_scene_check → ppt_deck_render →
  *   （横切）ppt_asset_register / ppt_image_generate / ppt_log_query / ppt_deck_status /
  *   ppt_doctor / ppt_deck_find_replace（批量改词）/ ppt_deck_branch（试错分支）
@@ -23,6 +24,7 @@ import { createThemeTools, createDesignTools } from './design.js'
 import { createOutlineTools } from './outline.js'
 import { createPlanTools } from './plan.js'
 import { createPageTools } from './page.js'
+import { createSkeletonTools } from './skeleton.js'
 import { createCheckTools } from './check.js'
 import { createRenderTools } from './render.js'
 import { createPreviewTools } from './preview.js'
@@ -143,6 +145,7 @@ export function buildPptStudioTools(config: ResolvedPptStudioConfig): ToolDefini
     ...createPlanTools(config),
     ...createDesignTools(config),
     ...createPageTools(config),
+    ...createSkeletonTools(config),
     ...createCheckTools(config),
     ...createRenderTools(config),
     ...createPreviewTools(config),

@@ -111,8 +111,11 @@ description: 制作结构化演示文稿（PPT）的完整工作室：简报（�
 
 ## 阶段 5：Section Production——逐页生成（边生成边看）
 
-逐页 `ppt_page_write`（坐标/版式规则先读 `reference/layouts.md`；**按部分顺序一气写完，不逐部分停下来等确认**）：
-- **写页语义（重要）**：`ppt_page_write` 默认**整页替换**——scene.elements 必须是这一页的**完整**元素清单（含标题、装饰、全部节点）。遗漏既有元素会被**拒绝保存**（报错列出丢失元素）。**增量修改优先合并语义**：`append:true` + `remove:["元素id"]`——未提及元素保留、同 id 原位替换、新 id 追加、remove 中的显式删除（不触发丢元素闸门）；整页确要删元素时也可用 `allowDrop:true`。
+逐页 `ppt_page_write`（**按部分顺序一气写完，不逐部分停下来等确认**）。写页有两条路，**优先内容模式**：
+- **content 内容模式（0.11.0，推荐写法）**：`scene.content` 只传语义内容（标题/条目/图表数据/表格行……），版式引擎按页型模板自动展开元素清单——坐标、字号阶梯、锁定令牌色、标题条、卡片衬底全部自动套用，不会触发越界/互压/溢出类拒绝。`type` 缺省取蓝图页型、`title` 缺省取蓝图标题。各页型字段：bullets/icon-list → `items[]`；two-col/comparison → `columns:[{title,items[]}]`（两项）；process → `steps:[{name,desc}]`；timeline → `events:[{label,desc}]`；cards → `cards:[{title,desc}]`（2-4 张）；hierarchy → `layers[]`；big-number → `bigNumber:{value,unit,desc,source}`；chart → `chart:{chartType,labels[],series:[{name,values[]}],conclusion}`；table → `table:{header[],rows[][],note}`；quote → `quote:{text,source}`；image-text → `image:{assetId|prompt,heading,items[]}`；toc → `entries[]`；cover/closing → `subtitle`；`notes` 演讲者备注。示例：`{"scene":{"content":{"title":"三波浪潮","items":["符号主义","连接主义","大模型"]}}}`。文字过多时引擎自动缩字号并在回执 `[版式引擎]` 说明——仍建议精简。
+- **手写元素模式**（精细控制版式时）：`scene.elements` 逐元素给坐标（先读 `reference/layouts.md`），要求见下。
+- **ppt_page_skeleton 骨架**（0.11.0 写页辅助）：`ppt_page_skeleton {deckId,pageId}` 按蓝图一键生成**通过全部校验的占位页**（版式引擎 + 蓝图概要切分），立即落盘可预览；随后用 `append:true` 同 id 原位替换把占位文字换成正式内容。适合：先看页面框架再填内容、写页反复失败后的重建。
+- **写页语义（重要）**：`ppt_page_write` 默认**整页替换**——scene.elements 必须是这一页的**完整**元素清单（含标题、装饰、全部节点）。遗漏既有元素会被**拒绝保存**（报错列出丢失元素）。**增量修改优先合并语义**：`append:true` + `remove:["元素id"]`——未提及元素保留、同 id 原位替换、新 id 追加、remove 中的显式删除（不触发丢元素闸门）；整页确要删元素时也可用 `allowDrop:true`。content 内容模式是按蓝图的有意整页重写，不受丢元素闸门限制。
 - **svg 路线写页（0.10.0，renderRoute=svg 的 deck）**：scene 给 `svg`（整页源码）而非 elements——整页替换语义、无 append/remove。纪律：viewBox 固定 "0 0 1280 720"；颜色只用锁定色板 hex；文字用 `<text>/<tspan>`（能被时长估算与论断扫描识别，勿转路径轮廓）；**禁止任何外部引用与脚本**（校验 SVG_UNSAFE 强制；图片以 data URI 内嵌或改走原生 image）；**每写一页 ppt_preview_update 肉眼把关**——版式确定性规则不适用，预览就是这条路线的 QA 主通道。
 - **公式排版（重要）**：数学公式的上标/下标必须用 runs 的 `superscript` / `subscript`——`QK^T` 写成 `"QK"` + `{"text":"T","superscript":true}`，`d_k` 写成 `"d"` + `{"text":"k","subscript":true}`。**禁止**用 Unicode `ᵀ`（中文字体普遍缺字形，渲染成方框）和字面 `^`/`_` 记法（显示成代码不像数学）。`²`（U+00B2）等常见上标数字可用。公式行用居中 text 元素 + 大一号字。
 - **图表/表格数据**：`chart.labels` 与 `table.rows` 一律写字符串（数字刻度写 `"32"`，不要写数字）。
@@ -169,6 +172,7 @@ description: 制作结构化演示文稿（PPT）的完整工作室：简报（�
    - 连续同类失败时不要提交等效内容，改前置条件（页数、分配、必填字段），或回退到上一个用户确认点重新对齐（如重调 `ppt_pageplan_confirm` 改分配/总页数，或重调 `ppt_outline_draft`）；
    - 若无法确定该传什么，停下来向用户说明卡点并请求确认，不要用重试试探。
    - **连败兜底（0.10.3）**：`ppt_section_draft` 连续 3 次被拒后会自动降级为逐页累积模式（回执带 🔔 通知与进度"已收 X/N 页"）——此时按回执逐页提交即可，集满自动恢复；**🔔 降级说明必须原样转述给用户**。
+   - **写页连败兜底（0.11.0 弱模型辅助）**：`ppt_page_write` 连续失败 3 次后自动开启**弱模型辅助模式**（deck 级持久）——裸 elements 整页替换被拒绝，只能：① 改用 `scene.content` 内容模式（版式引擎自动排版，不再手写坐标）；② `ppt_page_skeleton` 生成骨架页后 `append:true` 小步替换文字（append 增量不受限）。**🔔 开启通知必须原样转述给用户**；用户明确要求恢复手写元素模式时带 `overrideAssist:true`。
 3. **原因不明或疑似环境问题**（渲染失败、模块报错、链路整体异常）：调 `ppt_doctor`——
    它汇报 pptxgenjs 解析路径与互操作形态、输出目录可写性、预览端口、失败快照数量。
 4. **查调用痕迹**：`ppt_log_query {source:"plugin"}` 看插件级调用日志（每次调用的形态标注、
@@ -186,7 +190,7 @@ description: 制作结构化演示文稿（PPT）的完整工作室：简报（�
 - 颜色/字体禁止越出锁定令牌（design/tokens.json）。
 - 内网环境：禁止引用任何外链资源（图片/字体/CDN）。图片全部走资产登记或占位框。
 
-## ppt_page_write 常见错误写法（务必对照）
+## ppt_page_write 常见错误写法（务必对照；用 content 内容模式可整表绕开——版式引擎产出的元素天然合规）
 
 | ❌ 错误写法 | ✅ 正确写法 |
 |---|---|

@@ -1,6 +1,6 @@
 # dsh-ppt-studio：PPT 生成流程逻辑
 
-> 本文是生成流水线的**权威逻辑文档**（对应插件版本 0.10.3）：每个阶段做什么、产出什么、
+> 本文是生成流水线的**权威逻辑文档**（对应插件版本 0.11.0）：每个阶段做什么、产出什么、
 > 卡哪些确认关卡、校验哪些规则、修改如何传播。工具参数级细节见各工具的 JSON Schema
 > 与 `src/tools/*.ts`；面向模型的操作手册见 `skills/dsh-ppt-studio/SKILL.md`。
 
@@ -134,7 +134,7 @@ svg 路线的取舍必须在选择时向用户明示：视觉自由度换掉了�
 └──────────────────────────────────────────┘
 ```
 
-工具共 **19 个**，与阶段的对应见第三节。
+工具共 **20 个**，与阶段的对应见第三节。
 
 ## 三、各阶段逻辑
 
@@ -240,11 +240,17 @@ svg 路线的取舍必须在选择时向用户明示：视觉自由度换掉了�
 
 | 项 | 内容 |
 |---|---|
-| 工具 | `ppt_page_write`（逐页）、`ppt_preview_update`（每部分后刷新预览）、`ppt_asset_register` / `ppt_image_generate`（配图） |
+| 工具 | `ppt_page_write`（逐页；**content 内容模式**或手写 elements）、`ppt_page_skeleton`（骨架：按蓝图生成合法占位页）、`ppt_preview_update`（每部分后刷新预览）、`ppt_asset_register` / `ppt_image_generate`（配图） |
 | 产物 | `pages/p00N.json`；stage=writing |
 | 节奏 | **不逐部分停下来等确认**；每完成一个部分调 `ppt_preview_update`，用户在浏览器边看边提修改（局部修改走改页流程，不阻塞后续部分） |
 
-`ppt_page_write` 内部四段式管线（每页同步执行）：
+**写页双路径（0.11.0）**：native 路线的 `ppt_page_write` 有两种输入形态——
+
+- **content 内容模式（推荐，弱模型主路径）**：`scene.content` 只传语义内容（标题/条目/图表数据等扁平字段），**版式引擎**（`src/autolayout.ts`）按页型模板 + 锁定令牌确定性展开为完整元素清单。layouts.md 的坐标速查从"给模型阅读的文档"变成"代码执行的模板"：坐标/字号阶梯/令牌色/标题条/卡片衬底全部自动，文字过多自动缩字号并知情——越界/互压/溢出/令牌这类 error 级拒绝从源头消失（单测逐页型断言引擎产物 errorCount === 0）。产物是普通 elements 场景（落盘格式不变，渲染/校验/迁移零改动）；type/title 缺省取蓝图值；按蓝图整页重写不受丢元素闸门限制。
+- **手写元素模式**：`scene.elements` 逐元素绝对坐标（原路径，强模型精细控制版式用）。
+- **ppt_page_skeleton 骨架工具**：读蓝图页（type/title/keyMessage/contentBrief）用版式引擎生成占位场景（概要确定性切分，不做语义生成），落盘即可预览；模型随后 `append:true` 同 id 原位替换占位文字——「必然合法的脚手架 + 小步编辑」替代「从零生成大 JSON」。
+
+`ppt_page_write` 内部四段式管线（每页同步执行；content 模式在管线前先由引擎展开为 elements）：
 
 ```
 容错归一（normalizeSceneInput：扁平 text 展开/对象包数组/数字转字符串/"key=#hex"（含带引号形态）损坏键拆分/
@@ -265,6 +271,7 @@ svg 路线的取舍必须在选择时向用户明示：视觉自由度换掉了�
 - **配图先于写页**：蓝图 visual:image 的页先按 contentBrief 生成图片描述调 ppt_image_generate 拿 assetId 再写页（已配置生图时），减少占位割裂；未配置再走 placeholder。
 - **生图提示词与令牌协调（0.9.2，借鉴 ppt-master 的"同 deck 全部图共用色彩锚"纪律）**：prompt 是一段连贯散文——风格家族（同 deck 统一一种）+ 主体视觉名词 + 构图 + 色彩行为（写明占比并与锁定色板协调）+ 图内不写字（图内一个词 = 一次重生成的成本）。ppt_image_generate 在设计锁定后返回 deckPalette（bg/primary/accent）摘要，色彩协调靠返回提醒与 SOP 纪律达成，不静默改写用户 prompt。
 - 即时预览：`ppt_preview_update` 毫秒级把已写页面刷新到自包含 HTML 播放器，不出 PPTX、不要求 sceneHash——它是观察窗口不是终检。成功后自动打开浏览器（**默认每阶段各弹第一次**：即时预览首开一次、正式渲染完成再开一次，各自跨调用/重启不重复；`PPT_STUDIO_PREVIEW_AUTO_OPEN=0` 完全关闭、`=always` 恢复每次打开），URL 始终同时以文字给出。
+- **弱模型辅助闩锁（0.11.0）**：`ppt_page_write` 连续失败 ≥3 次（plugin.log 连败统计，与熔断/逐页降级同一数据源）后自动开启，deck 级持久化 `state.weakModelAssist`——写页 SOP 确定性切换为「content 内容模式 + ppt_page_skeleton 骨架 + append 小步增量」：裸 elements **整页替换**被拒绝（报错自带两种替代写法示例），content 模式、append 增量、svg 路线不受限；用户明确要求可 `overrideAssist:true` 恢复。开启/拦截报错均带 🔔 用户通知块（SOP 要求原样转述）。与 0.10.3 逐页降级同模式：连败的治法不是"报错写得更明白指望模型改对"，而是换一条对弱模型天然友好的路径。
 
 ### 阶段 6：Deck Integration——全册校验（依赖感知增量标注）
 
@@ -319,7 +326,7 @@ Deck 级：重新 ppt_design_lock → 令牌变 → sceneHash 失效 → 全册�
 
 ### 横切与排查工具
 
-不属于单一阶段、全程可用的工具：`ppt_asset_register` / `ppt_image_generate`（阶段 5 配图：登记本地图片 / 生图接口）、`ppt_preview_update`（阶段 5/8 即时预览与进度条）、`ppt_deck_pause`（阶段 5 暂停/恢复生成）、`ppt_deck_find_replace` / `ppt_deck_branch`（阶段 8 批量改词 / 试错分支）、`ppt_log_query`（日志查询，按 stage/pageId/level 过滤，`source:"plugin"` 查插件级调用日志与失败入参快照——快照存 `<rootDir>/logs/failed/`，全局 FIFO 保留最近 100 份，0.8.1 起不会无限堆积）、`ppt_deck_status`（进度查看，不传 deckId 列全部 deck）、`ppt_doctor`（环境体检：pptxgenjs 解析路径与互操作形态、依赖可用性、输出目录可写性、预览端口探活、生图配置、失败快照数量——工具报错原因不明时先调它）。
+不属于单一阶段、全程可用的工具：`ppt_asset_register` / `ppt_image_generate`（阶段 5 配图：登记本地图片 / 生图接口）、`ppt_preview_update`（阶段 5/8 即时预览与进度条）、`ppt_page_skeleton`（阶段 5 写页辅助：按蓝图生成合法骨架页）、`ppt_deck_pause`（阶段 5 暂停/恢复生成）、`ppt_deck_find_replace` / `ppt_deck_branch`（阶段 8 批量改词 / 试错分支）、`ppt_log_query`（日志查询，按 stage/pageId/level 过滤，`source:"plugin"` 查插件级调用日志与失败入参快照——快照存 `<rootDir>/logs/failed/`，全局 FIFO 保留最近 100 份，0.8.1 起不会无限堆积）、`ppt_deck_status`（进度查看，不传 deckId 列全部 deck）、`ppt_doctor`（环境体检：pptxgenjs 解析路径与互操作形态、依赖可用性、输出目录可写性、预览端口探活、生图配置、失败快照数量——工具报错原因不明时先调它）。
 
 ## 四、数据模型与工作区
 
@@ -588,6 +595,7 @@ grid          marginX 0.6 / contentTop 1.6 / contentBottom 7.0 / 画布 13.3333�
 | 0.10.1 | **小模型死循环护栏（真实会话事故修复）**：8B 本地小模型把 s0 结构页逐页提交（整段覆盖下互相覆盖、进度永停 1/3），随后对 design_lock 等效重试 91 次、空烧约 19 分钟 token 后被用户中止——**s0 三页一次交齐硬校验**（缺页即拒并说明覆盖语义）；**覆盖提醒回执**（重复调用同一部分返回 `replaced` 并醒目提示旧页已丢弃）；**连续失败熔断**（同工具连续失败 ≥5 次拦截不执行、plugin.log 记 `blocked`、每 5 次拦截放行一次试探、修好后自动恢复，连续失败提示预告熔断阈值） |
 | 0.10.2 | **校验报错可执行化（真实会话事故修复）**：模型调 ppt_section_draft 时页数与确认分配不符（s1 需 2 页只传 1 页），对报错原样重发 9+ 次直至熔断、用户中止——**页数/分配类校验错误全部附可执行示例**：section_draft 分配不符报错直接写明"部分 sN 需要 X 页（当前传入 Y 页），请提供 X 个 page 对象后重试，或重调 ppt_pageplan_confirm 改分配"；pageplan_confirm 分配总和不符报错列出当前传入的各部分分配与差距页数；内容页超预算报错附超出页数与各部分现状；三处错误均明示"参数校验拒绝，原样重发不会成功"。SKILL.md「排查」新增"参数校验类错误必须改参，不得原样重发"专条 |
 | 0.10.3 | **ppt_section_draft 连败自适应降级（逐页蓝图模式）+ 用户通知（同一事故的治本修复）**：0.10.2 把报错改成可执行提示，但"模型是否照做"不可控——同一部分连续 3 次因页数与确认分配被拒后**自动降级为逐页累积模式**：接受分次提交（每次 1 页也可）、追加而非覆盖（s0 按 type 去重累积）；只改提交粒度不改计划语义（累积总量仍精确等于确认分配，超剩余槽位照样拒绝并报槽位数；总页数/分配/下游校验不变）。闩锁持久化 `state.draftPagewise`（quota 快照），集满自动解除恢复整段覆盖，重调 pageplan_confirm / revise 亦解除；failureStreak 移入 toollog.ts 与熔断共用；降级回执带 🔔 用户通知块（"请把本段原样告知用户"）+ 进度"已收 X/N 页"，ppt_deck_status 同步展示；SKILL 立规则：🔔 通知必须原样转述用户。ppt_pageplan_confirm 不降级（页总数是用户决策） |
+| 0.11.0 | **版式引擎 + 写页双路径 + 弱模型辅助闩锁（量化 8B 级模型的系统性适配）**：弱模型手写元素清单（x/y/w/h 坐标算术 + 长 JSON 输出）是最大失败面——① `ppt_page_write` 新增 **scene.content 内容模式**：只传语义内容（标题/条目/图表数据等扁平字段），版式引擎（`src/autolayout.ts`）按页型模板 + 锁定令牌确定性展开为完整元素清单（坐标/字号阶梯/令牌色/标题条/卡片衬底全自动，文字过多自缩字号并知情，图表系列对齐/表格补列/未登记资产降占位在引擎内消化）；产物是普通 elements 场景，渲染/校验/迁移零改动；单测逐页型断言引擎产物通过全部 error 级校验。② 新工具 **ppt_page_skeleton**：按蓝图页生成合法骨架占位页（概要确定性切分），模型用 append 小步替换占位文字——「必然合法的脚手架 + 小步编辑」替代「从零生成大 JSON」。③ **弱模型辅助闩锁**（`state.weakModelAssist`，deck 级持久）：ppt_page_write 连续失败 ≥3 次自动开启，裸 elements 整页替换被拒绝并给出两种替代写法示例（content 模式 / 骨架+append；append 增量不受限；overrideAssist:true 可恢复）——与 0.10.3 逐页降级同模式：连败治法是换路径而非指望模型改对。工具 19→20；新增插件本地 vitest 配置与 57 项单测（版式引擎不变量 / 内容模式集成 / 闩锁行为 / 骨架工具 / 版本一致性） |
 
-当前：**19 个工具、12 套主题（6 类分类）、17 种页型、10 种信息结构、40 条校验规则、168 项单测**。
-回归入口：`npm run build && npm test && npm run demo`（demo 端到端走完阶段 0–8，含设计预设、即时预览、修改循环演示）。
+当前：**20 个工具、12 套主题（6 类分类）、17 种页型、10 种信息结构、40 条校验规则、57 项单测**。
+回归入口：`npm run build && npm test && npm run demo`（demo 端到端走完阶段 0–8，含设计预设、即时预览、修改循环演示；`npm test` 走插件本地 vitest 配置，只跑本插件 tests/）。

@@ -615,6 +615,19 @@ export const deckStateSchema = z.object({
       }),
     )
     .optional(),
+  /**
+   * 弱模型辅助闩锁（0.11.0）：ppt_page_write 连续失败 ≥3 次后进入——写页 SOP 切换为
+   * 「content 内容模式（版式引擎自动排版）+ ppt_page_skeleton 骨架 + append 小步增量」，
+   * 裸 elements 整页替换被拒绝（append:true 增量仍可用）。deck 级持久；用户明确要求可带
+   * overrideAssist:true 恢复完整元素模式。
+   */
+  weakModelAssist: z
+    .object({
+      enteredAt: z.string(),
+      reason: z.string(),
+      fails: z.number().int().min(1),
+    })
+    .optional(),
   /** 分支来源（ppt_deck_branch 快照复制自哪个 deck） */
   parentDeckId: idSchema.optional(),
 })

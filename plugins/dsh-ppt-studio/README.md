@@ -5,7 +5,7 @@ DSH（DeepSeek Harness）PPT 工作室插件：**简报（听众/场景/目标/�
 - 同一份场景 JSON 同时渲染两份产物：`deck.pptx`（pptxgenjs，原生可编辑文本/形状/表格/图表）与自包含 HTML 预览播放器（无外链，内网可用）
 - **双渲染路线**（0.10.0）：`brief.renderRoute` = **native**（默认，pptxgenjs 原生元素逐个可编辑 + 全部版式规则保护）/ **svg**（自由 SVG 绘制，viewBox 0 0 1280 720——HTML 预览原生内联、PPTX 端整页矢量图嵌入 PowerPoint 2016+，版式校验不适用、写页后预览肉眼把关）；两条路线共享蓝图/设计锁定/指纹闸门/修改循环全部流水线
 - **生成模式三档**（0.7.0）：`brief.mode` = **quick**（1 个打包确认，其余采纳建议值，快速出稿）/ **standard**（默认，逐阶段确认）/ **precise**（+Prototype 3 页真实效果确认 + 叙事链/证据严检）；配套 `evidenceLevel` 证据等级（none/business/academic）
-- 19 个独立工具 + SKILL.md SOP（阶段 0–8），standard/precise 模式强制「简报确认 → 叙事架构确认 → 页数分配确认 → 样例质量确认 → 整体蓝图确认 → 设计预设选定并锁定 → 一气写完（边生成边预览）」的交互节奏（quick 打包确认一次）；用户确认的是内容页数（封面/目录/结尾 3 页自动附加）
+- 20 个独立工具 + SKILL.md SOP（阶段 0–8），standard/precise 模式强制「简报确认 → 叙事架构确认 → 页数分配确认 → 样例质量确认 → 整体蓝图确认 → 设计预设选定并锁定 → 一气写完（边生成边预览）」的交互节奏（quick 打包确认一次）；用户确认的是内容页数（封面/目录/结尾 3 页自动附加）
   完整流程逻辑见 **[docs/generation-flow.md](docs/generation-flow.md)**（权威文档：各阶段输入输出/确认关卡/校验规则全集/状态机/修改传播）
 - **Prototype 真实效果确认**（0.7.0）：锁定设计时按结构聚类自动挑 ≤3 个代表页（spec.prototypePages）；precise 模式先写这 3 页刷新预览让用户看**最终长相**再批量——避免"18 页写完才发现不喜欢这个风格"，试错成本只有 3 页
 - **叙事链与证据层**（0.7.0）：蓝图页页可带 `transition`（承接上一页/埋钩子下一页）与 `evidence`（claim/type/source）；`ppt_scene_check` 返回 storyline 叙事链摘要 + 疑似断裂页清单（storylineGaps）供逐页自审，business/academic 级数字论断缺来源会被 EVIDENCE_SOURCE_MISSING 拦下
@@ -67,7 +67,8 @@ node lib/cli.js ppt_log_query '{"deckId":"<id>","tail":20}'
 | `ppt_section_draft` | 3 | 单部分 **Page Blueprint**：每页 页型/标题/概要/purpose/keyMessage/structure/density/visual/**transition 叙事衔接**/**evidence 证据条目**；s0 专放结构页；Σ内容页=确认值、有分配时精确匹配 |
 | `ppt_design_propose` | 4A | 生成 2-3 套设计预设（原定/密度变体/气质相邻主题），展示给用户选定 |
 | `ppt_design_lock` | 4B | 按选定方案（可选 themeId/density/paletteOverrides）产出并锁定两份计划文件：`design/spec.json`（含 **prototypePages 代表页**）+ `design/tokens.json` |
-| `ppt_page_write` | 5 | 写/改单页场景（默认整页替换、丢元素拒绝保存；`append:true`+`remove:[id]` 合并语义、`allowDrop:true` 确认删除）；error 级问题拒绝落盘；TOKEN/密度/结构匹配/配图计划/证据来源/要点预算校验（按 strictness 分级）；run 级上下标支持公式排版 |
+| `ppt_page_write` | 5 | 写/改单页场景，native 双路径：**content 内容模式**（只传标题/条目/图表数据，版式引擎按页型模板自动排版——0.11.0，弱模型主路径）或手写 elements（默认整页替换、丢元素拒绝保存；`append:true`+`remove:[id]` 合并语义、`allowDrop:true` 确认删除）；error 级问题拒绝落盘；TOKEN/密度/结构匹配/配图计划/证据来源/要点预算校验（按 strictness 分级）；run 级上下标支持公式排版 |
+| `ppt_page_skeleton` | 5 | 写页辅助（0.11.0）：按蓝图页一键生成**通过全部校验的骨架占位页**（版式引擎 + 概要确定性切分），落盘即可预览；随后 `append:true` 同 id 原位替换占位文字 |
 | `ppt_preview_update` | 5/8 | 即时预览：毫秒级刷新已写页面的 HTML 预览（不出 PPTX、免 sceneHash），每阶段首开各只自动弹一次浏览器，边生成边看；确认点含 prototype 的 Prototype 关卡也走它 |
 | `ppt_scene_check` | 6 | 全册校验 + 跨页集成检查（版式单调/多样性/视觉节奏/叙事链/标题结论感）+ sceneHash 指纹；**依赖感知**：返回变更页清单 revalidated + **storyline 叙事链摘要** + **duration 时长估算** |
 | `ppt_deck_render` | 7 | 渲染 PPTX + 预览 HTML + report.json（只认锁定令牌） |
@@ -92,6 +93,7 @@ src/
 ├── config.ts         行配置 + 环境变量解析
 ├── schema.ts         场景数据模型（zod：brief/plan/outline/section/tokens/spec/page/element）
 ├── themes.ts         12 套主题（色板/渐变/图表色/字体）+ buildDesignTokens
+├── autolayout.ts     版式引擎（0.11.0）：content 语义内容 → 按页型模板+锁定令牌确定性展开为元素清单
 ├── validate.ts       确定性校验器（越界/重叠/文字容量/资产/图表/令牌/密度/配图计划）
 ├── deck-store.ts     deck 工作区与状态机（原子写、sceneHash）
 ├── logger.ts         JSONL 日志 + report.json
@@ -164,7 +166,7 @@ skills/dsh-ppt-studio/
 
 4. **验证加载**：
    - 打开 `%USERPROFILE%\.dsh\profiles\web\package.json`，`dsh.profile.bundles` 应含 `"dsh-ppt-studio"`
-   - `pnpm dsh web` 启动日志出现 `dsh-ppt-studio` 层；会话里模型可见 19 个 `ppt_*` 工具与 dsh-ppt-studio 技能
+   - `pnpm dsh web` 启动日志出现 `dsh-ppt-studio` 层；会话里模型可见 20 个 `ppt_*` 工具与 dsh-ppt-studio 技能
 
 5. **预览服务**（deck 产物静态托管）：
 
@@ -207,6 +209,15 @@ skills/dsh-ppt-studio/
 - pptxgenjs 对页面尺寸有 ±几十 EMU 的取整（13.3333in ≈ 12192000 EMU，PowerPoint 打开显示一致）
 
 ## 修复记录
+
+### 0.11.0（2026-09-18）：版式引擎 + 写页双路径 + 弱模型辅助闩锁（量化 8B 级模型系统性适配）
+
+0.10.1–0.10.3 修的都是"死循环"症状（熔断/可执行报错/逐页降级），本次治写页失败率的**上游根因**：弱模型手写元素清单（坐标算术 + 长结构化 JSON 输出）本身就是最大失败面。本次交付：
+
+1. **ppt_page_write 内容模式（scene.content）**：模型只传语义内容（标题/条目/图表数据/表格行等扁平字段），版式引擎（`src/autolayout.ts`）按页型模板 + 锁定令牌**确定性展开**为完整元素清单——坐标、字号阶梯、令牌色、标题条、卡片衬底全自动；文字过多自缩字号并知情回执；图表系列对齐 labels、表格补齐列数、未登记 assetId 降级占位框都在引擎内消化。产物是普通 elements 场景（落盘格式不变，渲染/校验/迁移零改动）。**核心不变量：17 种页型的引擎产物天然通过全部 error 级校验（单测逐页型断言）。**
+2. **新工具 ppt_page_skeleton（第 20 个）**：按蓝图页一键生成合法骨架占位页（概要确定性切分），立即落盘可预览；模型用 `append:true` 同 id 原位替换把占位文字换成正式内容——「必然合法的脚手架 + 小步编辑」替代「从零生成大 JSON」。
+3. **弱模型辅助闩锁（state.weakModelAssist）**：ppt_page_write 连续失败 ≥3 次（与熔断/逐页降级同一 plugin.log 连败数据源）自动开启，deck 级持久——裸 elements **整页替换**被拒绝，报错自带两种替代写法示例（content 内容模式 / 骨架+append）；append 增量、content 模式、svg 路线不受限；用户明确要求可 `overrideAssist:true` 恢复。🔔 通知需原样转述用户（SKILL 已立规则）。
+4. **测试基建**：插件本地 `vitest.config.ts`（npm test 只跑本插件，不再冒泡到 monorepo 根配置）；57 项单测覆盖版式引擎不变量、内容模式集成、闩锁行为、骨架工具、版本一致性。
 
 ### 0.10.3（2026-09-18）：ppt_section_draft 连败自适应降级（逐页蓝图模式）+ 用户通知
 
