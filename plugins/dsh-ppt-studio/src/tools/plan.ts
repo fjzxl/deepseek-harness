@@ -150,7 +150,13 @@ export function createPlanTools(config: ResolvedPptStudioConfig): ToolDefinition
           }
           const sum = provided.reduce((acc, a) => acc + a.pages, 0)
           if (sum !== args.contentPages) {
-            throw new Error(`分配总和 ${sum} 与内容页数 ${args.contentPages} 不一致（请先与用户对齐再传入）`)
+            const diff = sum - args.contentPages
+            throw new Error(
+              `分配总和 ${sum} 与内容页数 ${args.contentPages} 不一致（${diff > 0 ? '多' : '少'} ${Math.abs(diff)} 页）；` +
+                `当前传入：${provided.map(a => `${a.sectionId}=${String(a.pages)}`).join(' / ')}。` +
+                `请调整各部分页数使总和等于 ${args.contentPages} 后重试（例如把差距补到页数最多/最少的部分），` +
+                '或与用户对齐后按新总页数重调本工具。这是参数校验拒绝：原样重发相同参数永远不会成功，必须先改参。',
+            )
           }
           allocation = partIds.map(id => provided.find(a => a.sectionId === id)!)
         } else {
@@ -172,6 +178,8 @@ export function createPlanTools(config: ResolvedPptStudioConfig): ToolDefinition
         })
         await store.saveJson(store.paths(args.deckId).plan, plan)
         state.stage = 'planned'
+        // 分配重定（0.10.3）：逐页蓝图降级闩锁的 quota 快照随之失效，全部清除恢复严格模式
+        state.draftPagewise = undefined
         await store.saveState(state)
         const logger = createDeckLogger(store.paths(args.deckId).root, args.deckId)
         logger.info('plan', '页数已确认', { contentPages: plan.contentPages, totalPages: plan.totalPages, allocationConfirmed: allocation.length > 0 })

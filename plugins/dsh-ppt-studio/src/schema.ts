@@ -605,6 +605,16 @@ export const deckStateSchema = z.object({
   architectureRevisedAt: z.string().optional(),
   /** 生成暂停标记（ppt_deck_pause 设置；暂停期间 ppt_page_write 拒绝写入） */
   paused: z.boolean().optional(),
+  /** 逐页蓝图降级闩锁（0.10.3）：ppt_section_draft 连败后进入逐页累积模式的部分；累积达配额自动解除 */
+  draftPagewise: z
+    .record(
+      z.object({
+        enteredAt: z.string(),
+        reason: z.string(),
+        quota: z.number().int().min(1),
+      }),
+    )
+    .optional(),
   /** 分支来源（ppt_deck_branch 快照复制自哪个 deck） */
   parentDeckId: idSchema.optional(),
 })

@@ -54,10 +54,37 @@ start_nginx() {
   nginx
 }
 
+# dsh-passwords 认证网关接入(幂等,每次启动执行;全新 $DSH_HOME 卷时 profile 为空,
+# 运行期注册才能自愈——与插件官方 bundled 入口同一流程):
+#   docker-init        首启生成 /data/dsh-passwords/.env(含一次性 SETUP_KEY)
+#   register-plugin    精确注册进 web profile(不用 dsh plugin add,见脚本头注释)
+#   patch              打远程设置补丁,失败拒绝启动
+# 网关随 dsh web 自启动,监听 0.0.0.0:8080 反代到回环 nginx。
+# dsh-passwords auth gateway wiring (idempotent, runs on every start so a fresh
+# $DSH_HOME volume self-heals): init state → register into web profile → patch.
+ensure_passwords() {
+  node "$DSH_ROOT/plugins/dsh-passwords/dist/cli.js" docker-init
+  node "$DSH_ROOT/plugins/dsh-passwords/scripts/register-plugin.mjs"
+  if ! node "$DSH_ROOT/plugins/dsh-passwords/dist/cli.js" patch; then
+    echo "entrypoint: dsh-passwords patch failed, refusing to start" >&2
+    exit 1
+  fi
+  # docker-init 默认把网关写成 3088/上游 3080;本镜像拓扑是网关:8080 → nginx:8090
+  sed -i -e 's/^MCP_GATEWAY_PORT=.*/MCP_GATEWAY_PORT=8080/' \
+         -e 's|^MCP_GATEWAY_UPSTREAM=.*|MCP_GATEWAY_UPSTREAM=http://127.0.0.1:8090|' \
+         /data/dsh-passwords/.env
+  grep -q '^MCP_GATEWAY_HOST=' /data/dsh-passwords/.env \
+    || echo 'MCP_GATEWAY_HOST=0.0.0.0' >> /data/dsh-passwords/.env
+  if [ -f /data/dsh-passwords/setup-key.txt ]; then
+    echo "entrypoint: dsh-passwords 首次配置密钥: cat /data/dsh-passwords/setup-key.txt"
+  fi
+}
+
 case "${1:-}" in
   web)
     shift
     ensure_plugins
+    ensure_passwords
     mkdir -p "$PPT_STUDIO_OUTPUT_DIR"
     node "$PLUGIN_DIR/lib/preview-server.js" &
     start_nginx

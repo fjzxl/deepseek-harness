@@ -47,6 +47,25 @@ npm run build      # TypeScript 编译到 lib/（DSH 宿主加载 lib/ 入口）
 npm run preview    # 可选：启动预览服务（node lib/preview-server.js）
 ```
 
+### dsh-passwords（v2.7.1）
+
+服务器级认证网关插件（GPL-3.0，**入库与再发布必须保留其 `LICENSE`**）：登录页 +
+主/子用户多租户 + 权限配额 + 审计加密 + 可选自动 HTTPS。解决 DSH 0.1.5-rc.2 浏览器
+会话认证（browser-auth）导致的远程访问 401：插件在 dsh 进程内加载，启动时自动用
+launch token 换取 authority 绑定 Cookie，网关注入后反代全部 HTTP/WS 路径。
+
+- 来源：<https://github.com/slywalker2006/dsh-passwords>（v2.7.1 发布形态副本，剔除 `test/`）
+- 集成方式：`docker/Dockerfile` 构建 `dist/`，`docker/entrypoint.sh` 在启动时
+  `docker-init` → `scripts/register-plugin.mjs` 精确注册 → `cli.js patch` 打补丁，
+  网关随 `dsh web` 自启动，监听 0.0.0.0:8080 反代到回环 nginx。
+- 状态目录 `/data/dsh-passwords`（`.env`/SQLite/证书），挂卷持久化。
+
+```bash
+cd plugins/dsh-passwords
+npm ci             # 按 npm-shrinkwrap.json 复现安装
+npm run build      # tsc + 客户端打包到 dist/
+```
+
 ## 与开发源仓库的同步
 
 本目录内容是开发源仓库的**发布形态副本**（按上述约定剔除依赖/测试/产物）。

@@ -16,7 +16,7 @@
  */
 import type { ResolvedPptStudioConfig } from '../config.js'
 import { lossless, previewJson } from '../normalize.js'
-import { createToolLogger, describeArgsForm } from '../toollog.js'
+import { createToolLogger, describeArgsForm, failureStreak } from '../toollog.js'
 import { resolveToolContext } from './registry.js'
 import { createBriefTools } from './brief.js'
 import { createThemeTools, createDesignTools } from './design.js'
@@ -35,7 +35,12 @@ import type { ToolDefinition } from './registry.js'
 
 const ARGS_PREVIEW_MAX = 600
 
-/** 包一层 execute：lossless 清洗 + 插件级调用日志 + 失败入参快照。 */
+/** 熔断阈值（0.10.1）：同一工具连续失败达到此次数后拦截后续调用，防止原样重试死循环空烧 token。ppt_section_draft 另有更低的降级阈值（0.10.3，tools/outline.ts DEGRADE_AFTER=3）：连败先转逐页累积模式，正常到不了本阈值。 */
+const BREAKER_OPEN_AFTER = 5
+/** 熔断期间每拦截 N 次放行一次试探调用（half-open）：前置状态被其它工具修好后试探成功即自动恢复。 */
+const BREAKER_PROBE_EVERY = 5
+
+/** 包一层 execute：lossless 清洗 + 插件级调用日志 + 失败入参快照 + 连续失败熔断。 */
 function withDiagnostics(config: ResolvedPptStudioConfig, definition: ToolDefinition): ToolDefinition {
   const execute = definition.execute
   return {
@@ -47,13 +52,45 @@ function withDiagnostics(config: ResolvedPptStudioConfig, definition: ToolDefini
       const frozen = rawArgs !== null && (typeof rawArgs === 'object' || typeof rawArgs === 'function') && Object.isFrozen(rawArgs)
       let toolLogger: ReturnType<typeof createToolLogger> | undefined
       try {
+        const { store } = resolveToolContext(config, exec)
+        toolLogger = createToolLogger(store.rootDir)
+      } catch { /* 解析不出工作区（异常形态的 exec）则跳过日志与熔断 */ }
+
+      // 连续失败熔断（0.10.1）：真实会话里小模型对 ppt_design_lock 换汤不换药地重试 91 次、
+      // 空烧约 19 分钟 token。熔断只拦截不执行，每 BREAKER_PROBE_EVERY 次拦截放行一次试探。
+      if (toolLogger !== undefined) {
+        let streak: { errors: number; blocked: number } | undefined
+        try {
+          streak = failureStreak(await toolLogger.readTail(64), definition.name)
+        } catch { /* 统计失败不阻断业务 */ }
+        if (streak !== undefined && streak.errors >= BREAKER_OPEN_AFTER && (streak.blocked + 1) % BREAKER_PROBE_EVERY !== 0) {
+          toolLogger.record({
+            tool: definition.name,
+            argsForm,
+            frozen,
+            outcome: 'blocked',
+            durationMs: Date.now() - start,
+            argsPreview: previewJson(rawArgs, ARGS_PREVIEW_MAX),
+          })
+          await toolLogger.flush()
+          throw new Error(
+            `🚫 熔断保护：${definition.name} 已连续失败 ${String(streak.errors)} 次且从未成功，本次调用未执行（拦截原样重试死循环）。\n` +
+              '请停止重试，按顺序排查：\n' +
+              '  ① 调 ppt_doctor 体检环境；\n' +
+              '  ② 调 ppt_log_query {"source":"plugin"} 查看最近失败的入参与堆栈；\n' +
+              '  ③ 按最近一次的失败提示真正改变前置条件（补齐缺失内容/修正参数），而不是换种写法提交等效的内容；\n' +
+              '  ④ 仍无法推进时向用户说明卡点。\n' +
+              `熔断期间每 ${String(BREAKER_PROBE_EVERY)} 次调用放行一次试探，前置条件被其它工具修好后重试会自动恢复。`,
+          )
+        }
+      }
+
+      try {
         const value = lossless(await execute(rawArgs, exec))
-        // 日志尽力而为：解析不出工作区（异常形态的 exec）就跳过。
+        // 日志尽力而为（toolLogger 未解析出来时跳过）。
         // await 落盘：工具返回时日志必已在盘上，进程随后崩溃也不丢这次调用的痕迹。
         try {
-          const { store } = resolveToolContext(config, exec)
-          toolLogger = createToolLogger(store.rootDir)
-          toolLogger.record({
+          toolLogger?.record({
             tool: definition.name,
             argsForm,
             frozen,
@@ -64,26 +101,18 @@ function withDiagnostics(config: ResolvedPptStudioConfig, definition: ToolDefini
               ? String((value as Record<string, unknown>).deckId)
               : undefined,
           })
-          await toolLogger.flush()
+          await toolLogger?.flush()
         } catch { /* 日志失败不阻断业务 */ }
         return value
       } catch (error) {
         try {
-          const { store } = resolveToolContext(config, exec)
-          const logger = toolLogger ?? createToolLogger(store.rootDir)
+          const logger = toolLogger ?? createToolLogger(resolveToolContext(config, exec).store.rootDir)
           // 连续失败主动提示（0.9.0）：把排查从"用户想起调 doctor"变成报错自带指引
           try {
-            const tail = await logger.readTail(12)
-            let consecutive = 0
-            for (let i = tail.length - 1; i >= 0; i--) {
-              const entry = tail[i]
-              if (entry.tool !== definition.name) continue
-              if (entry.outcome === 'error') consecutive++
-              else break
-            }
-            if (consecutive >= 1 && error instanceof Error) {
+            const streak = failureStreak(await logger.readTail(64), definition.name)
+            if (streak.errors >= 1 && error instanceof Error) {
               error.message += `
-（该工具已连续失败 ${String(consecutive + 1)} 次：建议 ①调 ppt_doctor 体检环境；②ppt_log_query {"source":"plugin"} 查失败入参与堆栈；③连续同因失败请换写法，不要原样重试。）`
+（该工具已连续失败 ${String(streak.errors + 1)} 次：建议 ①调 ppt_doctor 体检环境；②ppt_log_query {"source":"plugin"} 查失败入参与堆栈；③连续同因失败请换写法，不要原样重试。连续失败 ${String(BREAKER_OPEN_AFTER)} 次将触发熔断，后续调用会被拦截。）`
             }
           } catch { /* 统计失败不阻断抛错 */ }
           const snapshot = await logger.snapshotFailed(definition.name, rawArgs)

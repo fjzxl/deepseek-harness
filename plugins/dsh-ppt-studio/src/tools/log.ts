@@ -39,7 +39,7 @@ export function createLogTools(config: ResolvedPptStudioConfig): ToolDefinition[
             const lines = [`🩺 插件级调用日志（最近 ${entries.length} 条，${String(v.pluginLogPath)}）：`]
             for (const raw of entries) {
               const e = asRecord(raw)
-              const mark = e.outcome === 'error' ? '❌' : '✅'
+              const mark = e.outcome === 'error' ? '❌' : e.outcome === 'blocked' ? '🚫' : '✅'
               lines.push(
                 `  ${mark} ${String(e.ts).slice(11, 19)} ${String(e.tool)} (${String(e.durationMs ?? '?')}ms)` +
                 ` 形态=${String(e.argsForm)}${e.frozen === true ? ' 冻结' : ''}` +
@@ -118,6 +118,13 @@ export function createLogTools(config: ResolvedPptStudioConfig): ToolDefinition[
             if (d.renderOutdated === true) flags.push('⚠️ 已校验未渲染，需 ppt_deck_render')
             if (d.architectureRevisedAt != null) flags.push('架构已修订，需重走 2–5')
             if (d.paused === true) flags.push('已暂停')
+            const pagewise = asRecord(d.draftPagewise)
+            const pagewiseProgress = asRecord(d.pagewiseProgress)
+            for (const [sid, raw] of Object.entries(pagewise)) {
+              const pw = asRecord(raw)
+              const received = pagewiseProgress[sid]
+              flags.push(`🔔 逐页蓝图模式：${sid} 已收 ${received !== undefined ? String(received) : '?'}/${String(pw.quota ?? '?')} 页（累积满额自动恢复）`)
+            }
             const flagText = flags.length > 0 ? `｜${flags.join('；')}` : ''
             return `- ${String(d.deckId)}｜${String(d.title)}｜阶段 ${stage}（${STAGE_ORDER.indexOf(stage as (typeof STAGE_ORDER)[number]) + 1}/7）｜页面 ${progress}${flagText}`
           })
@@ -131,11 +138,21 @@ export function createLogTools(config: ResolvedPptStudioConfig): ToolDefinition[
         if (args.deckId !== undefined) {
           const state = await requireDeckState(store, args.deckId)
           const outline = await store.loadOutline(args.deckId)
+          // 逐页蓝图降级进度（0.10.3）：从 outline 现有页数算各闩锁部分的已收页数
+          const pagewiseProgress: Record<string, number> = {}
+          if (state.draftPagewise !== undefined && outline !== undefined) {
+            for (const sid of Object.keys(state.draftPagewise)) {
+              pagewiseProgress[sid] = sid === 's0'
+                ? ['cover', 'toc', 'closing'].filter(t => outline.pages.some(p => p.sectionId === 's0' && p.type === t)).length
+                : outline.pages.filter(p => p.sectionId === sid).length
+            }
+          }
           return {
             decks: [{
               ...state,
               pageCountTotal: outline?.pages.length,
               pagesWrittenCount: state.pagesWritten.length,
+              pagewiseProgress,
             }],
           }
         }

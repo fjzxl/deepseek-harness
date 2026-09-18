@@ -24,11 +24,15 @@ import {
   visualPlanEnum,
 } from '../schema.js'
 import { createDeckLogger } from '../logger.js'
+import { createToolLogger, failureStreak } from '../toollog.js'
 import { requireDeckState } from '../deck-store.js'
 import type { ResolvedPptStudioConfig } from '../config.js'
 import { asRecord, oneText, resolveToolContext, type ToolDefinition } from './registry.js'
 
 const STRUCTURAL_TYPES = ['cover', 'toc', 'closing'] as const
+
+/** 逐页蓝图降级阈值（0.10.3）：ppt_section_draft 连续失败达到此次数后进入逐页累积模式（低于 tools/index.ts 的熔断阈值 5——降级把失败转为接受，正常到不了熔断）。 */
+const DEGRADE_AFTER = 3
 
 const outlineArgsSchema = z.object({
   deckId: z.string().min(1),
@@ -309,6 +313,8 @@ export function createOutlineTools(config: ResolvedPptStudioConfig): ToolDefinit
           state.contentOutdated = false
           state.renderOutdated = false
           state.architectureRevisedAt = new Date().toISOString()
+          // 蓝图全部作废，逐页降级闩锁（0.10.3）一并作废
+          state.draftPagewise = undefined
         }
 
         const parts = args.parts.map((part, index) => ({ ...part, id: part.id ?? `s${index + 1}` }))
@@ -332,7 +338,9 @@ export function createOutlineTools(config: ResolvedPptStudioConfig): ToolDefinit
         'transition（叙事衔接：fromPrevious 承接上一页/nextHook 埋给下一页的钩子，strictness=strict 时缺失升 warning）、' +
         'evidence（证据条目 claim/type/source/materialId/locator，内网环境来源只能来自用户材料，无法核实的数据改定性表述或标「数据待补充」）。' +
         '落盘 sections/<sid>.json 并合并进 outline.json 的页级清单。' +
-        'sectionId=s0 专门放结构页（封面/目录/结尾，各恰好一页）；若 plan 有确认的分配则各部分页数必须精确匹配，否则只需 Σ=确认页数。' +
+        'sectionId=s0 专门放结构页（封面/目录/结尾，必须一次交齐各一页；分次提交会互相覆盖，design_lock 必然报缺少结构页）；若 plan 有确认的分配则各部分页数必须精确匹配，否则只需 Σ=确认页数。' +
+        '对同一 sectionId 重复调用是整段覆盖：未包含在本次 pages 中的已有页会被丢弃，要保留的旧页必须一并提交。' +
+        '同一部分连续提交被拒达到阈值时会自动降级为逐页累积模式（接受分次提交、追加而非覆盖，回执带 🔔 降级通知，须原样转述给用户），累积满确认分配自动恢复整段覆盖语义。' +
         '页 ID 由工具按全册顺序自动编号（封面→目录→各部分→结尾），无需手填；已在写作中重草拟时，其他部分的已写页会随重排自动迁移文件与校验指纹，蓝图变化页会被清除并提示重写。' +
         '全部部分完成后把整体 Blueprint 展示给用户确认，再调 ppt_design_lock。中文：生成单部分页面蓝图。',
       parameters: {
@@ -402,6 +410,31 @@ export function createOutlineTools(config: ResolvedPptStudioConfig): ToolDefinit
             `进度：内容页 ${String(progress.contentPages) ?? '?'}/${String(progress.contentTarget) ?? '?'}，` +
               `结构页（封面/目录/结尾）：${String(progress.structuralDone ?? '?')}/3。`,
           )
+          const replaced = typeof v.replaced === 'number' ? v.replaced : 0
+          if (replaced > 0) {
+            lines.push(
+              `⚠️ 覆盖提醒：本次调用整体替换了该部分原有的 ${String(replaced)} 页蓝图——未包含在本次 pages 中的旧页已丢弃。` +
+                'ppt_section_draft 是整段覆盖语义，要保留的旧页必须一并提交，不能只交增量。',
+            )
+          }
+          const pagewise = asRecord(v.pagewise)
+          if (v.pagewise !== undefined) {
+            const received = typeof pagewise.received === 'number' ? pagewise.received : '?'
+            const quota = typeof pagewise.quota === 'number' ? pagewise.quota : '?'
+            if (pagewise.entered === true) {
+              lines.push(
+                `🔔 已自动降级为逐页蓝图模式（部分 ${String(v.sectionId)}）：ppt_section_draft 连续 3 次因页数与确认分配不一致被拒绝，` +
+                  `为避免原样重试死循环，本部分现在接受分次提交（每次 1 页也可），累积满 ${String(quota)} 页自动恢复正常模式。`,
+                `【请把本段降级说明原样告知用户：${String(v.sectionId)} 的页面蓝图改为逐页生成；总页数不变（仍为确认的 ${String(quota)} 页），` +
+                  '内容与质量校验不受影响。若希望恢复一次交齐，可回复"取消逐页模式"后重调 ppt_pageplan_confirm。】',
+              )
+            }
+            if (pagewise.completed === true) {
+              lines.push(`✅ 逐页蓝图模式完成（部分 ${String(v.sectionId)} 已集满 ${String(received)}/${String(quota)} 页）：本部分已恢复整段覆盖语义。`)
+            } else {
+              lines.push(`📥 逐页蓝图模式（部分 ${String(v.sectionId)}）：已收 ${String(received)}/${String(quota)} 页，请继续提交剩余页（每次 1 页也可）。`)
+            }
+          }
           const migration = asRecord(v.migration)
           if (migration.renumbered !== undefined || migration.invalidated !== undefined) {
             const renumbered = Array.isArray(migration.renumbered) ? migration.renumbered : []
@@ -452,6 +485,54 @@ export function createOutlineTools(config: ResolvedPptStudioConfig): ToolDefinit
         if (!isStructural && !outline.parts.some(p => p.id === args.sectionId)) {
           throw new Error(`部分 ${args.sectionId} 不在叙事架构中（可用：${outline.parts.map(p => p.id).join(' / ')}，结构页用 s0）`)
         }
+
+        // 逐页蓝图降级（0.10.3）：连败 ≥DEGRADE_AFTER 次后本部分进入逐页累积模式（追加而非覆盖，
+        // 每次 1 页也可），累积满配额自动解除闩锁恢复整段覆盖语义。只改提交粒度，不改计划语义：
+        // 累积总量仍精确等于确认分配。闩锁持久化在 state.json——否则第 4 次接受 1 页成功 →
+        // 连败清零 → 第 5 次又回到严格模式拒收第 2 页，逻辑断裂。
+        let pagewise = state.draftPagewise?.[args.sectionId]
+        const currentQuota = isStructural
+          ? STRUCTURAL_TYPES.length
+          : plan.allocation.find(a => a.sectionId === args.sectionId)?.pages
+        const clearLatch = () => {
+          const rest = { ...state.draftPagewise }
+          delete rest[args.sectionId]
+          state.draftPagewise = Object.keys(rest).length > 0 ? rest : undefined
+          pagewise = undefined
+        }
+        // 配额快照与最新 plan 核对：重调过 ppt_pageplan_confirm 改了分配则闩锁作废（双保险，plan.ts 重确认时已清）
+        if (pagewise !== undefined && (currentQuota === undefined || pagewise.quota !== currentQuota)) clearLatch()
+        // 防御性解除：闩锁本该在集满时解除；发现已集满则直接恢复严格模式
+        if (pagewise !== undefined) {
+          const alreadyFull = isStructural
+            ? STRUCTURAL_TYPES.every(t => outline.pages.some(p => p.sectionId === 's0' && p.type === t))
+            : outline.pages.filter(p => p.sectionId === args.sectionId).length >= pagewise.quota
+          if (alreadyFull) clearLatch()
+        }
+        let pagewiseEntered = false
+        if (pagewise === undefined && currentQuota !== undefined) {
+          // 统计本工具连败（与熔断同一数据源：plugin.log 尾部连续 error）
+          let streakErrors = 0
+          try {
+            streakErrors = failureStreak(await createToolLogger(store.rootDir).readTail(64), 'ppt_section_draft').errors
+          } catch { /* 统计失败不阻断业务 */ }
+          if (streakErrors >= DEGRADE_AFTER) {
+            pagewise = {
+              enteredAt: new Date().toISOString(),
+              reason: `ppt_section_draft 连续 ${String(streakErrors)} 次提交被拒绝（页数与确认分配不一致）`,
+              quota: currentQuota,
+            }
+            state.draftPagewise = { ...state.draftPagewise, [args.sectionId]: pagewise }
+            pagewiseEntered = true
+            // 闩锁立即落盘：即使本次调用随后失败，降级状态也不丢
+            await store.saveState(state)
+            createDeckLogger(store.paths(args.deckId).root, args.deckId).info(
+              'section',
+              `部分 ${args.sectionId} 进入逐页蓝图降级模式（连败 ${String(streakErrors)} 次，配额 ${String(currentQuota)} 页）`,
+            )
+          }
+        }
+
         if (isStructural) {
           for (const page of args.pages) {
             if (!(STRUCTURAL_TYPES as readonly string[]).includes(page.type)) {
@@ -460,6 +541,19 @@ export function createOutlineTools(config: ResolvedPptStudioConfig): ToolDefinit
           }
           const types = args.pages.map(p => p.type)
           if (new Set(types).size !== types.length) throw new Error('结构页每种类型（封面/目录/结尾）恰好一页，不得重复')
+          // 0.10.1：s0 必须一次交齐三页。整段覆盖语义下分次补交会互相覆盖，
+          // 缺口永远补不齐（真实会话事故：小模型逐页提交 s0，design_lock 连报 91 次"缺少结构页"）。
+          // 0.10.3：逐页降级模式下放宽为按 type 去重累积，集齐三类解除闩锁。
+          if (pagewise === undefined) {
+            const missing = STRUCTURAL_TYPES.filter(t => !types.includes(t))
+            if (missing.length > 0) {
+              throw new Error(
+                `结构页（s0）必须一次交齐 ${STRUCTURAL_TYPES.join(' / ')} 各一页（共 3 页），本次缺少：${missing.join(' / ')}。` +
+                  'ppt_section_draft 对同一部分是整段覆盖：分多次补交会互相覆盖，缺口永远补不齐，ppt_design_lock 必然报"缺少结构页"。' +
+                  '请把封面、目录、结尾 3 个页条目放进同一个 pages 数组一次提交。',
+              )
+            }
+          }
         } else {
           for (const page of args.pages) {
             if ((STRUCTURAL_TYPES as readonly string[]).includes(page.type) && page.type !== 'closing') {
@@ -471,16 +565,43 @@ export function createOutlineTools(config: ResolvedPptStudioConfig): ToolDefinit
         // 分配硬校验：plan 有确认分配时各部分页数必须精确匹配
         if (!isStructural) {
           const allocated = plan.allocation.find(a => a.sectionId === args.sectionId)
-          if (allocated !== undefined && allocated.pages !== args.pages.length) {
-            throw new Error(
-              `部分 ${args.sectionId} 的页数 ${args.pages.length} 与确认的分配 ${allocated.pages} 页不一致；` +
-                '调整该部分页数，或与用户重新确认分配后重调 ppt_pageplan_confirm',
-            )
+          if (pagewise === undefined) {
+            if (allocated !== undefined && allocated.pages !== args.pages.length) {
+              throw new Error(
+                `部分 ${args.sectionId} 需要 ${allocated.pages} 页（当前传入 ${args.pages.length} 页），与确认的分配不一致；` +
+                  `请为 ${args.sectionId} 提供 ${allocated.pages} 个 page 对象后重试，` +
+                  `或先重调 ppt_pageplan_confirm 把 ${args.sectionId} 的分配改为 ${args.pages.length} 页。` +
+                  '这是参数校验拒绝：原样重发相同参数永远不会成功，必须先按本提示改参。',
+              )
+            }
+          } else {
+            // 逐页累积模式：追加而非覆盖，不得超过剩余槽位（累积总量仍精确等于确认分配）
+            const latch = pagewise
+            const existingCount = outline.pages.filter(p => p.sectionId === args.sectionId).length
+            const remaining = latch.quota - existingCount
+            if (args.pages.length > remaining) {
+              throw new Error(
+                `逐页蓝图模式（部分 ${args.sectionId}）：剩余 ${remaining} 个槽位（已收 ${existingCount}/${latch.quota} 页），` +
+                  `本次传了 ${args.pages.length} 页；请减少到 ${remaining} 页以内后重试（每次 1 页也可）。` +
+                  '这是参数校验拒绝：原样重发相同参数永远不会成功，必须先改参。',
+              )
+            }
           }
         }
 
-        // 替换该部分的页面，其余部分保留
-        const kept = outline.pages.filter(p => p.sectionId !== args.sectionId)
+        // 严格模式整段覆盖（0.10.1：记录被覆盖的页数，回执里向模型亮明覆盖语义）；
+        // 逐页模式追加：内容部分在已有页之后累积，s0 按 type 去重累积（同 type 后交覆盖先交）
+        const pagewiseActive = pagewise !== undefined
+        const replacedCount = pagewiseActive ? 0 : outline.pages.filter(p => p.sectionId === args.sectionId).length
+        let kept: OutlinePage[]
+        if (pagewiseActive && isStructural) {
+          const incomingTypes = new Set(args.pages.map(p => p.type))
+          kept = outline.pages.filter(p => !(p.sectionId === 's0' && (incomingTypes as Set<string>).has(p.type)))
+        } else if (pagewiseActive) {
+          kept = outline.pages
+        } else {
+          kept = outline.pages.filter(p => p.sectionId !== args.sectionId)
+        }
         const incoming: OutlinePage[] = args.pages.map(page => outlinePageSchema.parse({
           ...page,
           id: 'pXXX',
@@ -493,7 +614,17 @@ export function createOutlineTools(config: ResolvedPptStudioConfig): ToolDefinit
 
         const contentCount = merged.pages.filter(p => p.sectionId !== 's0').length
         if (contentCount > plan.contentPages) {
-          throw new Error(`内容页超出预算：已草拟 ${contentCount} 页 > 确认的 ${plan.contentPages} 页。请减少页数或与用户重新确认 ppt_pageplan_confirm`)
+          const breakdown = plan.allocation.length > 0
+            ? plan.allocation
+              .map(a => `${a.sectionId}=${String(merged.pages.filter(p => p.sectionId === a.sectionId).length)}`)
+              .join(' / ')
+            : ''
+          throw new Error(
+            `内容页超出预算：已草拟 ${contentCount} 页 > 确认的 ${plan.contentPages} 页（超 ${contentCount - plan.contentPages} 页` +
+              (breakdown !== '' ? `；当前各部分：${breakdown}` : '') +
+              `）。请删减 ${contentCount - plan.contentPages} 页后重试，或与用户重新确认后重调 ppt_pageplan_confirm 增大页数。` +
+              '这是参数校验拒绝：原样重发相同参数永远不会成功，必须先改参。',
+          )
         }
 
         // 全册规范化重编号（封面→目录→各部分→结尾）+ 已写页迁移（0.8.0：
@@ -529,6 +660,19 @@ export function createOutlineTools(config: ResolvedPptStudioConfig): ToolDefinit
         const partsDone = outline.parts.filter(p => renumbered.pages.some(page => page.sectionId === p.id)).length
         const complete = structuralDone === 3 && partsDone === outline.parts.length && contentCount === plan.contentPages
         state.stage = complete ? 'drafted' : 'planned'
+
+        // 闩锁解除（0.10.3）：累积达配额 → 恢复整段覆盖语义
+        const activeLatch = pagewise
+        let pagewiseCompleted = false
+        if (pagewiseActive && activeLatch !== undefined) {
+          const full = isStructural
+            ? STRUCTURAL_TYPES.every(t => renumbered.pages.some(p => p.sectionId === 's0' && p.type === t))
+            : renumbered.pages.filter(p => p.sectionId === args.sectionId).length >= activeLatch.quota
+          if (full) {
+            pagewiseCompleted = true
+            clearLatch()
+          }
+        }
         await store.saveState(state)
 
         const logger = createDeckLogger(store.paths(args.deckId).root, args.deckId)
@@ -536,6 +680,7 @@ export function createOutlineTools(config: ResolvedPptStudioConfig): ToolDefinit
           pages: renumbered.pages.filter(p => p.sectionId === args.sectionId).map(p => `${p.id}:${p.type}:${p.structure}`),
           contentPages: contentCount,
           contentTarget: plan.contentPages,
+          ...(pagewiseActive ? { pagewise: { entered: pagewiseEntered, completed: pagewiseCompleted } } : {}),
           ...(migration !== undefined ? { migration } : {}),
         })
         return {
@@ -543,6 +688,19 @@ export function createOutlineTools(config: ResolvedPptStudioConfig): ToolDefinit
           sectionId: args.sectionId,
           pages: renumbered.pages.filter(p => p.sectionId === args.sectionId),
           progress: { contentPages: contentCount, contentTarget: plan.contentPages, structuralDone, partsDone, partsTotal: outline.parts.length },
+          ...(replacedCount > 0 ? { replaced: replacedCount } : {}),
+          ...(pagewiseActive && activeLatch !== undefined
+            ? {
+              pagewise: {
+                entered: pagewiseEntered,
+                received: isStructural
+                  ? structuralDone
+                  : renumbered.pages.filter(p => p.sectionId === args.sectionId).length,
+                quota: activeLatch.quota,
+                completed: pagewiseCompleted,
+              },
+            }
+            : {}),
           ...(migration !== undefined ? { migration } : {}),
         }
       },

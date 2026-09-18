@@ -31,8 +31,11 @@ pre-commit:
       glob: '{package.json,*/package.json,*/*/package.json,*/*/*/package.json,*/*/*/*/package.json,pnpm-workspace.yaml,*/*/pnpm-workspace.yaml,pnpm-lock.yaml,vendor/README.md,python/*/pyproject.toml,scripts/gen-third-party-notices.ts,scripts/browser-bundled-externals.ts,scripts/build-exe-for-python-sdk.ts,tsconfig.base*.json,packages/*/*/src/**/*,packages/*/*/tsdown.config.ts,packages/client/tsdown.client.ts,apps/*/src/**/*,apps/*/vite.config.ts}'
       run: node_modules/.bin/tsx scripts/gen-third-party-notices.ts && git add THIRD_PARTY_NOTICES.md
 
+    # plugins/** holds vendored plugin snapshots byte-synced from external
+    # source repos (see plugins/README.md); rewriting their trailing whitespace
+    # would break that sync, so the gate excludes them via pathspec.
     - name: whitespace (staged)
-      run: git diff --cached --check
+      run: git diff --cached --check -- . ':(exclude)plugins/**'
 
     - name: vendor manifest guard
       run: scripts/check-vendor-manifest.sh

@@ -24,7 +24,8 @@ export interface ToolCallRecord {
   argsForm: string
   /** 入参是否被宿主冻结（只读对象上原地赋值会 TypeError——真实事故源） */
   frozen: boolean
-  outcome: 'ok' | 'error'
+  /** ok=成功；error=执行失败；blocked=熔断拦截（未执行，见 tools/index.ts withDiagnostics） */
+  outcome: 'ok' | 'error' | 'blocked'
   durationMs: number
   /** 入参截断预览（完整内容看 snapshot） */
   argsPreview?: string
@@ -112,6 +113,27 @@ export function describeArgsForm(rawArgs: unknown): string {
   if (Array.isArray(rawArgs)) return 'array（应为对象）'
   if (rawArgs === null) return 'null'
   return typeof rawArgs
+}
+
+/**
+ * 该工具当前未恢复的失败 streak：从日志尾部向前数，遇到 ok 为止；
+ * blocked 只计最近一次真实失败之后的尾部连续拦截（试探失败即清零重计）。
+ * 熔断（tools/index.ts withDiagnostics）与逐页蓝图降级（tools/outline.ts）共用本函数，同一数据源。
+ */
+export function failureStreak(tail: ToolCallRecord[], tool: string): { errors: number; blocked: number } {
+  let errors = 0
+  let blocked = 0
+  for (let i = tail.length - 1; i >= 0; i--) {
+    const entry = tail[i]
+    if (entry.tool !== tool) continue
+    if (entry.outcome === 'ok') break
+    if (entry.outcome === 'blocked') {
+      if (errors === 0) blocked++
+      continue
+    }
+    errors++
+  }
+  return { errors, blocked }
 }
 
 /** 失败快照清单（供 ppt_doctor / ppt_log_query 展示）。 */
