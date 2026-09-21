@@ -210,6 +210,53 @@ skills/dsh-ppt-studio/
 
 ## 修复记录
 
+### 0.13.0（2026-09-21）：模型生成 SVG 矢量插图（无生图接口时的配图路径）
+
+用户反馈"图偏少"的根因之一是生图接口未配置、图文页只能出占位框。本次让**模型自己当生图接口**：image-text 页 `image.svg` 直接传 SVG 源码，与整页 svg 路线（0.10.0）同一嵌入链路。改动：
+
+- `schema`：image 元素与 content `image` 字段新增 `svg`（20–300K 字符）；`IMAGE_SOURCE_INVALID` 升级为 assetId/svg/placeholder 三选一；
+- `normalize`：`sanitizeSvg`（剥 script 块/on* 事件属性/foreignObject/iframe/embed/use/javascript: 链接）+ `normalizeSvgRoot`（保证 viewBox、剥根标签固定 width/height，渲染端用容器控尺寸）；
+- `autolayout.imageText`：svg 分支——清洗归一后按 viewBox 比例适配 5.6×4.6 图区（只缩不拉伸、居中）；非法 svg 降级占位框并给 layoutNote；
+- `render-html`：内联渲染（落盘前已清洗）；`render-pptx`：`image/svg+xml;base64` 数据 URI 嵌入（PowerPoint 2016+ 显示，与整页 svg 路线一致）；
+- `validate`：svg 元素框比例由引擎对齐，豁免 fit=fill 拉伸告警；
+- SKILL 立插图纪律：简洁示意风格（几何形状/图标/流程块+短标注）、viewBox 接近 5.6:4.6、锁定色板、`<text>` 文字、禁 script/外部引用、全册形语言统一。
+
+### 0.12.0（2026-09-21）：版式引擎稀疏自适应 + process 满宽（真实 deck d20260921-182914 用户反馈五项）
+
+用户对预览 deck 的反馈：① p008/p013 内容少、下半页大量空白；② 全册图偏少（p011 加图更有助理解）；③ p018 右侧空三成、三卡间距应拉大；④ p018 阶段标题"看不见"（实为标题框 0.6 高一行 + `fit:false`，长标题折行被裁）；⑤ 全册图形偏少。定位与修复：
+
+- **process 满宽**（③）：`stepW` 去掉 `Math.min(2.7, …)` 钳制，N 卡均分 12.13 可用宽（3 卡 2.7→3.88）；
+- **process 标题自适应**（④）：标题框 0.6→0.8 高并居中于 chevron，`fit:false`→`floor:12` 允许缩字号——长标题（如"阶段 2：RLHF（人类反馈强化学习）"）不再折行被裁；
+- **bullets 稀疏自适应**（①）：与 `estimateTextCapacity` 同一公式测占比——占不满时字号上调（≤24pt）、段距拉开（≤36pt）、整块垂直居中；文字多时行为不变（fit 缩字号照旧）；
+- **bullets 左装饰条 + iconList 步距/居中**（⑤）：纯文字页加主色竖条骨架；iconList 步距上限 0.85→1.05、条目少时整块居中；
+- **SKILL 视觉优先规则**（②⑤）：蓝图阶段概念/机制/关系/数据页优先图示型页型（process/timeline/comparison/hierarchy/image-text/chart/big-number），纯 bullets 控制在全册约 1/3；生图未配置时 image-text 仍出占位框，不退成纯文字页；
+- ②的根因之一是生图接口未配置（`ppt_doctor` 可查）——引擎无法凭空生图，靠页型选择与占位框兜底。
+
+### 0.11.3（2026-09-21）：确认点必须走 ask_user_question（用户点选而非打字）
+
+测试会话（2026-09-21）中模型把简报前置确认（受众/页数档位等）用**纯文本罗列 A/B/C/D 选项**让用户打字回复，而前一天的会话同样环境下调了 6 次 `ask_user_question` 正常点选——工具一直在工具列表里，SKILL 却从未规定确认的**发起方式**，MiniMax-M3 用不用全看发挥。本次：
+
+- SKILL.md SOP 开头立硬规则：凡 [用户确认]/[用户确认/修改]/[用户选定] 点必须调 `ask_user_question`（options 选项化、推荐项首位标注、相关问题一次合并 ≤4 问）；禁止纯文本罗列选项让用户打字；纯开放性问题（无候选可选）才用文本提问；
+- 技能内容在宿主启动时一次性读入注册表（`registerPptStudioSkill` 的 `readFileSync`），改 SKILL.md 需重启宿主生效；已在会话中的对话不会回填，需开新会话验证。
+
+### 0.11.2（2026-09-21）：{$text:} 标量包装还原 + 熔断按入参结构分型（sessionlog 2026-09-20 复盘）
+
+该会话 12 次 `ppt_page_write` 报错中有 7 次是熔断误拦：content 模式连败 5 次触发熔断后，模型按报错指引改投 `elements + append:true`（结构完全不同的换路调用）仍被"只看工具名"的熔断拦下，试探放行又恰好撞上未修复的 content 载荷，整场卡死直至用户中止。本次：
+
+- `deepRepair` 剥离标量字段的 `{"$text": X}` 包装（XML 文本节点风格）：`bullet:{"$text":"true"}` → `true`、`lineSpacing:{"$text":"1.4"}` → `1.4`（仅 `$text` 为唯一键且内值是标量时剥离，不碰 `{marker:…}` 合法对象）；
+- `bullet` 加入 `BOOLEAN_KEYS`（仅值已是字符串 "true"/"false" 时转换，对象形态不受影响）；
+- 熔断分型（0.11.2）：`plugin.log` 每条记录入参**结构指纹**（键路径骨架、值抹除、数组折叠），`failureStreak` 按 `(tool, shape)` 独立计数——同构换汤不换药的重试照拦（0.10.1 防 91 连投的初衷不变），结构性换路（content ↔ elements、增删 append/remove）不再被旧失败连坐；无 shape 字段的旧日志条目视为异型，升级后熔断一次性复位；
+- 回归测试：`normalize-repair` 用真实失败载荷（bullets `items:{item:[…]}`、two-col `columns:{item:[…]}`、timeline `events:{item:[…]}`、elements `bullet:{"$text":"true"}`）+ 熔断分型序列（5 败 → 换结构应放行 → 同构应拦截）。
+
+### 0.11.1（2026-09-20）：content 内容模式 {item:} 包装容错（真实会话根因修复）
+
+弱模型（MiniMax-M3）把 content 语义数组**稳定**序列化为 `{"item":[...]}`（XML 风格包装），bullets/two-col/timeline 三页连败 6 次触发熔断、整场制作中断（session d20260920-234200-0442）。工具说明承诺的"对象自动包数组"归一在 content 路径没有兑现——deepRepair 的还原键只覆盖了 elements 路径。本次：
+
+- `ARRAY_KEYS` 扩容：content 字段（`items/columns/events/steps/cards/layers/entries`，含 `columns[].items` 等嵌套）与蓝图/页数字段（`parts/pages/allocation`）；
+- `ppt_outline_draft` / `ppt_section_draft` / `ppt_pageplan_confirm` 解析前同样过 `deepRepair`（同形隐患前置消除）；
+- `ppt_page_write` 工具说明明示 `{"item":[…]}` 包装自动还原；
+- 回归测试：`page-write-content` 新增 3 个真实失败载荷用例（bullets/two-col/timeline 包装形态）。
+
 ### 0.11.0（2026-09-18）：版式引擎 + 写页双路径 + 弱模型辅助闩锁（量化 8B 级模型系统性适配）
 
 0.10.1–0.10.3 修的都是"死循环"症状（熔断/可执行报错/逐页降级），本次治写页失败率的**上游根因**：弱模型手写元素清单（坐标算术 + 长结构化 JSON 输出）本身就是最大失败面。本次交付：

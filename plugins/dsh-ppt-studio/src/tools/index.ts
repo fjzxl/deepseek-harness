@@ -17,7 +17,7 @@
  */
 import type { ResolvedPptStudioConfig } from '../config.js'
 import { lossless, previewJson } from '../normalize.js'
-import { createToolLogger, describeArgsForm, failureStreak } from '../toollog.js'
+import { createToolLogger, describeArgsForm, failureStreak, shapeFingerprint } from '../toollog.js'
 import { resolveToolContext } from './registry.js'
 import { createBriefTools } from './brief.js'
 import { createThemeTools, createDesignTools } from './design.js'
@@ -50,6 +50,9 @@ function withDiagnostics(config: ResolvedPptStudioConfig, definition: ToolDefini
     async execute(rawArgs: unknown, exec?: Parameters<ToolDefinition['execute']>[1]) {
       const start = Date.now()
       const argsForm = describeArgsForm(rawArgs)
+      // 结构指纹（0.11.2）：熔断按入参结构分型——只拦「同构换汤不换药」的重试；
+      // 模型按报错指引实质换路（如 content 模式连败后改投 elements+append）时指纹不同，放行
+      const shape = shapeFingerprint(rawArgs)
       // frozen 只反映顶层；宿主深冻结时顶层必然也是 frozen，足够作为信号
       const frozen = rawArgs !== null && (typeof rawArgs === 'object' || typeof rawArgs === 'function') && Object.isFrozen(rawArgs)
       let toolLogger: ReturnType<typeof createToolLogger> | undefined
@@ -60,29 +63,33 @@ function withDiagnostics(config: ResolvedPptStudioConfig, definition: ToolDefini
 
       // 连续失败熔断（0.10.1）：真实会话里小模型对 ppt_design_lock 换汤不换药地重试 91 次、
       // 空烧约 19 分钟 token。熔断只拦截不执行，每 BREAKER_PROBE_EVERY 次拦截放行一次试探。
+      // 0.11.2 起按结构指纹分型：同工具不同结构的调用各有独立计数——content 模式连败触发
+      // 熔断后，模型改投 elements+append（结构性换路）不被旧失败连坐（session 2026-09-20
+      // 曾因此被误拦 7 次、整场卡死）。
       if (toolLogger !== undefined) {
         let streak: { errors: number; blocked: number } | undefined
         try {
-          streak = failureStreak(await toolLogger.readTail(64), definition.name)
+          streak = failureStreak(await toolLogger.readTail(64), definition.name, shape)
         } catch { /* 统计失败不阻断业务 */ }
         if (streak !== undefined && streak.errors >= BREAKER_OPEN_AFTER && (streak.blocked + 1) % BREAKER_PROBE_EVERY !== 0) {
           toolLogger.record({
             tool: definition.name,
             argsForm,
             frozen,
+            shape,
             outcome: 'blocked',
             durationMs: Date.now() - start,
             argsPreview: previewJson(rawArgs, ARGS_PREVIEW_MAX),
           })
           await toolLogger.flush()
           throw new Error(
-            `🚫 熔断保护：${definition.name} 已连续失败 ${String(streak.errors)} 次且从未成功，本次调用未执行（拦截原样重试死循环）。\n` +
+            `🚫 熔断保护：${definition.name} 收到同结构入参已连续失败 ${String(streak.errors)} 次且从未成功，本次调用未执行（拦截换汤不换药的重试死循环）。\n` +
               '请停止重试，按顺序排查：\n' +
               '  ① 调 ppt_doctor 体检环境；\n' +
               '  ② 调 ppt_log_query {"source":"plugin"} 查看最近失败的入参与堆栈；\n' +
-              '  ③ 按最近一次的失败提示真正改变前置条件（补齐缺失内容/修正参数），而不是换种写法提交等效的内容；\n' +
+              '  ③ 按最近一次的失败提示真正改变前置条件（补齐缺失内容/修正参数/换调用方式——结构不同的调用不会被拦截），而不是换几个字符串重发同构请求；\n' +
               '  ④ 仍无法推进时向用户说明卡点。\n' +
-              `熔断期间每 ${String(BREAKER_PROBE_EVERY)} 次调用放行一次试探，前置条件被其它工具修好后重试会自动恢复。`,
+              `熔断期间每 ${String(BREAKER_PROBE_EVERY)} 次同构调用放行一次试探，前置条件被其它工具修好后重试会自动恢复。`,
           )
         }
       }
@@ -96,6 +103,7 @@ function withDiagnostics(config: ResolvedPptStudioConfig, definition: ToolDefini
             tool: definition.name,
             argsForm,
             frozen,
+            shape,
             outcome: 'ok',
             durationMs: Date.now() - start,
             argsPreview: previewJson(rawArgs, ARGS_PREVIEW_MAX),
@@ -111,10 +119,10 @@ function withDiagnostics(config: ResolvedPptStudioConfig, definition: ToolDefini
           const logger = toolLogger ?? createToolLogger(resolveToolContext(config, exec).store.rootDir)
           // 连续失败主动提示（0.9.0）：把排查从"用户想起调 doctor"变成报错自带指引
           try {
-            const streak = failureStreak(await logger.readTail(64), definition.name)
+            const streak = failureStreak(await logger.readTail(64), definition.name, shape)
             if (streak.errors >= 1 && error instanceof Error) {
               error.message += `
-（该工具已连续失败 ${String(streak.errors + 1)} 次：建议 ①调 ppt_doctor 体检环境；②ppt_log_query {"source":"plugin"} 查失败入参与堆栈；③连续同因失败请换写法，不要原样重试。连续失败 ${String(BREAKER_OPEN_AFTER)} 次将触发熔断，后续调用会被拦截。）`
+（该工具对同结构入参已连续失败 ${String(streak.errors + 1)} 次：建议 ①调 ppt_doctor 体检环境；②ppt_log_query {"source":"plugin"} 查失败入参与堆栈；③连续同因失败请换调用方式（结构不同的调用不受熔断影响），不要原样重试。同结构连续失败 ${String(BREAKER_OPEN_AFTER)} 次将触发熔断，后续同构调用会被拦截。）`
             }
           } catch { /* 统计失败不阻断抛错 */ }
           const snapshot = await logger.snapshotFailed(definition.name, rawArgs)
@@ -122,6 +130,7 @@ function withDiagnostics(config: ResolvedPptStudioConfig, definition: ToolDefini
             tool: definition.name,
             argsForm,
             frozen,
+            shape,
             outcome: 'error',
             durationMs: Date.now() - start,
             argsPreview: previewJson(rawArgs, ARGS_PREVIEW_MAX),

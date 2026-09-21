@@ -179,3 +179,54 @@ describe('composeSceneFromContent 核心不变量', () => {
     expect(splitSentences('', 3)).toEqual([])
   })
 })
+
+describe('0.12.0 版式引擎稀疏自适应（真实 deck d20260921-182914 用户反馈）', () => {
+  it('process N 卡满宽：3 步 chevron 铺满 12.13 可用宽（旧版钳 2.7 只铺 8.6）', () => {
+    const page = pageOf('process')
+    const chevrons = page.elements!.filter(e => e.kind === 'shape' && e.id.startsWith('st'))
+    expect(chevrons).toHaveLength(3)
+    const last = chevrons[chevrons.length - 1]! as { x: number; w: number }
+    expect(last.x + last.w).toBeGreaterThanOrEqual(12.6)
+    const first = chevrons[0]! as { x: number; w: number }
+    expect(first.x).toBe(0.6)
+    expect(first.w).toBeGreaterThan(3.5)
+  })
+
+  it('process 长标题不再被裁：标题框加高并允许缩字号（旧版 fit:false 一行 0.6 高）', () => {
+    const page = pageOf('process', { steps: [
+      { name: '阶段 1：监督微调 SFT', desc: '人工问答对' },
+      { name: '阶段 2：RLHF（人类反馈强化学习）', desc: '偏好排序训练' },
+      { name: '阶段 3：现代主流变体', desc: 'DPO 等直接偏好优化' },
+    ] })
+    const title = page.elements!.find(e => e.id.startsWith('stn2')) as { h: number; fontSize: number }
+    expect(title.h).toBeGreaterThanOrEqual(0.8)
+    expect(title.fontSize).toBeLessThanOrEqual(16)
+    // 满宽卡上 18 字标题一行即可容纳，不需缩到 floor
+    expect(title.fontSize).toBeGreaterThanOrEqual(12)
+  })
+
+  it('bullets 稀疏自适应：3 条短要点 → 字号上调/段距拉开/垂直居中（旧版固定 10pt 段距顶格）', () => {
+    const page = pageOf('bullets')
+    const body = page.elements!.find(e => e.id.startsWith('t-body')) as { y: number; fontSize: number; paragraphs: Array<{ spaceAfter?: number }> }
+    expect(body.y).toBeGreaterThan(1.7) // 垂直居中：起点下移
+    expect(body.paragraphs.some(p => (p.spaceAfter ?? 0) > 10)).toBe(true) // 段距拉开
+  })
+
+  it('bullets 稠密时行为不变：长要点多行仍从顶部起排、fit 缩字号', () => {
+    const page = pageOf('bullets', { items: Array.from({ length: 6 }, (_, i) => `第 ${i + 1} 条要点：这是一条相当长的要点文字，用来撑满整个文本框，验证稠密场景不触发居中与段距拉开逻辑而保持旧行为。`) })
+    const body = page.elements!.find(e => e.id.startsWith('t-body')) as { y: number; paragraphs: Array<{ spaceAfter?: number }> }
+    expect(body.y).toBe(1.7)
+    expect(body.paragraphs.every(p => (p.spaceAfter ?? 0) === 10)).toBe(true)
+  })
+
+  it('bullets 页带主色装饰竖条（纯文字页的图形骨架）', () => {
+    const page = pageOf('bullets')
+    expect(page.elements!.some(e => e.kind === 'shape' && e.id.startsWith('bar-body') && e.background === true)).toBe(true)
+  })
+
+  it('icon-list 条目少时整块居中（旧版固定 1.8 起）', () => {
+    const page = pageOf('icon-list')
+    const first = page.elements!.find(e => e.id.startsWith('li')) as { y: number }
+    expect(first.y).toBeGreaterThan(1.8)
+  })
+})

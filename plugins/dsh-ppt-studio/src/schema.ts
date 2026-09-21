@@ -167,6 +167,12 @@ export const imageElementSchema = z.object({
   ...boxSchema.shape,
   /** 已登记的资产 ID（ppt_asset_register / ppt_image_generate 返回） */
   assetId: idSchema.optional(),
+  /**
+   * 模型生成的内联矢量图（0.13.0，无生图接口时的配图路径）：sanitizeSvg 清洗 + viewBox 归一后落盘，
+   * HTML 预览内联渲染、PPTX 以 image/svg+xml 数据 URI 嵌入（PowerPoint 2016+ 显示）。
+   * 与 assetId / placeholder 三选一。
+   */
+  svg: z.string().min(20).max(300_000).optional(),
   /** 占位框：无图可放时给用户的替换提示 */
   placeholder: z
     .object({ prompt: z.string().min(1).max(120), hint: z.string().max(120).optional() })

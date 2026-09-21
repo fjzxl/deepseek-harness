@@ -24,6 +24,8 @@ export interface ToolCallRecord {
   argsForm: string
   /** 入参是否被宿主冻结（只读对象上原地赋值会 TypeError——真实事故源） */
   frozen: boolean
+  /** 入参结构指纹（shapeFingerprint 产出；熔断分型用） */
+  shape?: string
   /** ok=成功；error=执行失败；blocked=熔断拦截（未执行，见 tools/index.ts withDiagnostics） */
   outcome: 'ok' | 'error' | 'blocked'
   durationMs: number
@@ -119,13 +121,19 @@ export function describeArgsForm(rawArgs: unknown): string {
  * 该工具当前未恢复的失败 streak：从日志尾部向前数，遇到 ok 为止；
  * blocked 只计最近一次真实失败之后的尾部连续拦截（试探失败即清零重计）。
  * 熔断（tools/index.ts withDiagnostics）与逐页蓝图降级（tools/outline.ts）共用本函数，同一数据源。
+ *
+ * shape（0.11.2）：传入时按入参结构分型统计——只累计 shape 相同的条目，不同结构的
+ * 失败/拦截既不计数也不重置（弱模型按报错指引换调用方式后不该被旧失败连坐）；
+ * 无 shape 字段的旧日志条目视为异型跳过（升级后熔断一次性复位，可接受）。
+ * 省略 shape 时保持旧语义：同工具所有条目混计（降级/闩锁判定沿用）。
  */
-export function failureStreak(tail: ToolCallRecord[], tool: string): { errors: number; blocked: number } {
+export function failureStreak(tail: ToolCallRecord[], tool: string, shape?: string): { errors: number; blocked: number } {
   let errors = 0
   let blocked = 0
   for (let i = tail.length - 1; i >= 0; i--) {
     const entry = tail[i]
     if (entry.tool !== tool) continue
+    if (shape !== undefined && entry.shape !== shape) continue
     if (entry.outcome === 'ok') break
     if (entry.outcome === 'blocked') {
       if (errors === 0) blocked++
@@ -134,6 +142,23 @@ export function failureStreak(tail: ToolCallRecord[], tool: string): { errors: n
     errors++
   }
   return { errors, blocked }
+}
+
+/**
+ * 入参结构指纹：递归键路径骨架，值全部抹除、数组折叠为 []（元素内容视为值）。
+ * 用途：熔断只拦「换汤不换药」的同构重试——content 模式连败后改投 elements+append
+ * 是结构性换路（指纹不同，放行），而改几个字符串后原样重投是指纹不变的死循环（拦截）。
+ * 键排序保证稳定性；深度与长度截断防止病态入参撑爆日志。
+ */
+export function shapeFingerprint(value: unknown, depth = 0): string {
+  if (depth > 8) return '…'
+  if (Array.isArray(value)) return '[]'
+  if (value === null || typeof value !== 'object') return value === null ? 'null' : typeof value
+  const keys = Object.keys(value).sort()
+  if (keys.length === 0) return '{}'
+  const body = keys.map(key => `${key}:${shapeFingerprint((value as Record<string, unknown>)[key], depth + 1)}`).join(',')
+  const text = `{${body}}`
+  return text.length > 480 ? text.slice(0, 480) + '…' : text
 }
 
 /** 失败快照清单（供 ppt_doctor / ppt_log_query 展示）。 */

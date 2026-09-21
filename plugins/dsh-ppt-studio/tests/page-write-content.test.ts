@@ -134,6 +134,55 @@ describe('ppt_page_write content 内容模式', () => {
   })
 })
 
+describe('content 内容模式的 {item:} 包装容错', () => {
+  // 真实会话（2026-09-20 d20260920-234200-0442）：模型把语义数组序列化为 {"item":[...]}
+  // （XML 风格包装），三页连败触发熔断。deepRepair 应在 content 路径同样还原为纯数组。
+  it('bullets：content.items 为 {item:[...]} 时自动还原并落盘', async () => {
+    const f = await createFixture()
+    const result = (await f.pageWrite({
+      deckId: f.deckId,
+      pageId: 'p004',
+      scene: { content: { title: '大模型本质上是一台『接话机器』', items: { item: ['问 GPT 一个问题 = 让它接下一个最像答案的字', '它见过上千亿个词，能接出极多种上下文', '它的强项是看起来合理，不是保证正确'] } } },
+    })) as Record<string, unknown>
+    expect(result.ok).toBe(true)
+    expect(result.source).toBe('content')
+    const page = JSON.parse(readFileSync(join(f.store.paths(f.deckId).pagesDir, 'p004.json'), 'utf8'))
+    expect(page.type).toBe('bullets')
+    expect(page.elements.length).toBeGreaterThan(0)
+  })
+
+  it('two-col：content.columns 与嵌套 columns[].items 均为 {item:} 包装时还原', async () => {
+    const f = await createFixture()
+    const result = (await f.pageWrite({
+      deckId: f.deckId,
+      pageId: 'p004',
+      scene: { content: { type: 'two-col', title: '对比', columns: { item: [
+        { title: '手机输入法自动补全', items: { item: ['几十 MB 词表', '1 步接话', '中文纠错'] } },
+        { title: '大模型', items: { item: ['上千亿词', '多步接话', '上下文理解'] } },
+      ] } } },
+    })) as Record<string, unknown>
+    expect(result.ok).toBe(true)
+    const page = JSON.parse(readFileSync(join(f.store.paths(f.deckId).pagesDir, 'p004.json'), 'utf8'))
+    expect(page.type).toBe('two-col')
+  })
+
+  it('timeline：content.events 为 {item:} 包装时还原', async () => {
+    const f = await createFixture()
+    const result = (await f.pageWrite({
+      deckId: f.deckId,
+      pageId: 'p004',
+      scene: { content: { type: 'timeline', title: 'AI 三波浪潮', events: { item: [
+        { label: '1950s–1980s', desc: '规则系统：世界知识写不完' },
+        { label: '1990s–2010s', desc: '统计学习：从规则走向数据' },
+        { label: '2010s 至今', desc: '深度学习：规模取胜' },
+      ] } } },
+    })) as Record<string, unknown>
+    expect(result.ok).toBe(true)
+    const page = JSON.parse(readFileSync(join(f.store.paths(f.deckId).pagesDir, 'p004.json'), 'utf8'))
+    expect(page.type).toBe('timeline')
+  })
+})
+
 describe('弱模型辅助闩锁', () => {
   it('连续失败 ≥3 次后开启：裸 elements 整页替换被拒，content 与 append 不受限', async () => {
     const f = await createFixture()

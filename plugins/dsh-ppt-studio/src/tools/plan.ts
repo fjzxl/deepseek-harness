@@ -12,6 +12,7 @@ import { createDeckLogger } from '../logger.js'
 import { requireDeckState } from '../deck-store.js'
 import type { ResolvedPptStudioConfig } from '../config.js'
 import { asRecord, oneText, resolveToolContext, type ToolDefinition } from './registry.js'
+import { deepRepair } from '../normalize.js'
 
 const STRUCTURAL_PAGES = 3 // 封面 / 目录 / 结尾，自动附加
 
@@ -127,7 +128,7 @@ export function createPlanTools(config: ResolvedPptStudioConfig): ToolDefinition
             contentPages: z.number().int().min(2).max(60),
             allocation: allocationSchema.optional(),
           })
-          .parse(asRecord(rawArgs))
+          .parse(asRecord(deepRepair(rawArgs)))
         const { store } = resolveToolContext(config, exec)
         const state = await requireDeckState(store, args.deckId)
         const outline = await store.loadOutline(args.deckId)

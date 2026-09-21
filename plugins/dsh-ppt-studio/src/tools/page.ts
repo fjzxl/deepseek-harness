@@ -102,11 +102,12 @@ const shapeElementSchema = {
 
 const imageElementSchema = {
   type: 'object',
-  description: '图片元素：assetId（已登记资产）或 placeholder（占位框）二选一',
+  description: '图片元素：assetId（已登记资产）/ svg（内联矢量图，推荐）/ placeholder（占位框）三选一',
   properties: {
     ...baseProps,
     kind: { type: 'string', enum: ['image'] },
     assetId: { type: 'string', description: 'ppt_asset_register / ppt_image_generate 返回的 ID' },
+    svg: { type: 'string', description: '模型生成的 SVG 矢量插图源码（无生图接口时的配图路径）：<svg viewBox="0 0 560 460">…</svg>，简洁示意风格（几何形状/图标/流程块+短标注），引擎自动清洗并按 viewBox 比例适配' },
     placeholder: { type: 'object', properties: { prompt: { type: 'string', description: '建议配图说明' }, hint: { type: 'string' } }, required: ['prompt'] },
     fit: { type: 'string', enum: ['cover', 'contain', 'fill'], description: '默认 cover；fill 会拉伸慎用' },
     radius: { type: 'number', description: '圆角（短边百分比 0-50）' },
@@ -203,7 +204,7 @@ export function createPageTools(config: ResolvedPptStudioConfig): ToolDefinition
         'svg 路线（brief.renderRoute="svg"）：scene.svg 提供整页 SVG 源码（`<svg viewBox="0 0 1280 720">`，整页替换语义、无 append），HTML 预览原生内联、PPTX 端整页矢量图嵌入（PowerPoint 2016+），只校验安全面（SVG_UNSAFE：脚本/外链/foreignObject 禁止）、画布（SVG_VIEWSIZE）与锁定色板——版式确定性规则不适用，写完务必 ppt_preview_update 肉眼把关。' +
         '**公式排版**（手写元素时）：用 runs 的 superscript/subscript（QK^T → "QK"+sup(T)；d_k → "d"+sub(k)），不要写 Unicode ᵀ（中文字体缺字形显示为方框）或字面 ^/_ 记法。' +
         'chart.labels 与 table.rows 写字符串（数字刻度/单元格也写 "32" 这样的字符串）。' +
-        '写入时先做容错归一（扁平 text 自动展开、对象自动包数组、数字文本自动转字符串、labels/rows 数字自动转字符串、"key=#hex" 损坏键自动拆分），' +
+        '写入时先做容错归一（扁平 text 自动展开、对象自动包数组、{"item":[…]} 包装自动还原为纯数组——content 的 items/columns/events/steps/cards/layers/entries 同样适用、{"$text":X} 标量包装自动剥回（bullet/lineSpacing 等）、数字文本自动转字符串、labels/rows 数字自动转字符串、"key=#hex" 损坏键自动拆分），' +
         '再执行确定性校验（越界/文本互压/文字容量/图片登记/锁定令牌/信息密度/证据来源），有 error 时拒绝保存并返回问题清单与出错元素原文。' +
         '颜色与字体只能用 design/tokens.json 锁定的令牌；有主视觉（图/图表）的页面文字要精炼（DENSITY_WITH_VISUAL 会按 spec 预算提醒）。' +
         '**弱模型辅助模式**：写页连续失败 3 次后自动开启——裸 elements 整页替换被拒绝，只能用 content 内容模式或 ppt_page_skeleton 骨架 + append 小步增量（🔔 通知需转述用户）。中文：写入/更新单页 PPT 场景（内容模式 / native 元素 / 整页 SVG）。',
@@ -230,7 +231,7 @@ export function createPageTools(config: ResolvedPptStudioConfig): ToolDefinition
                   'title 可省略（取蓝图标题）。各页型取用字段：bullets/icon-list → items:["要点一","要点二"]；two-col/comparison → columns:[{title,items:[…]}]（两项）；' +
                   'process → steps:[{name,desc}]；timeline → events:[{label,desc}]；cards → cards:[{title,desc}]（2-4 张）；hierarchy → layers:["顶层","中层","底层"]；' +
                   'big-number → bigNumber:{value:"5",unit:"倍",desc:"含义",source?}；chart → chart:{chartType:"column",labels:[…],series:[{name,values:[…]}],conclusion?}；' +
-                  'table → table:{header:[…],rows:[[…]],note?}；quote → quote:{text,source?}；image-text → image:{assetId 或 prompt,heading?,items?}；' +
+                  'table → table:{header:[…],rows:[[…]],note?}；quote → quote:{text,source?}；image-text → image:{svg:"<svg viewBox=…>矢量插图</svg>"（推荐，无生图接口时）或 assetId/prompt, heading?, items?}；' +
                   'toc → entries:["章节一","章节二"]；cover/closing → subtitle；notes 为演讲者备注（可选）',
                 additionalProperties: true,
               },

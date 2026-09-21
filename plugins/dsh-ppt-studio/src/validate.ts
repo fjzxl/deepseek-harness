@@ -443,11 +443,13 @@ export function validatePage(page: PageScene, options: PageValidateOptions = {})
   const assetIds = new Set((manifest?.assets ?? []).map(a => a.assetId))
   for (const el of elements) {
     if (el.kind !== 'image') continue
-    if ((el.assetId !== undefined) === (el.placeholder !== undefined)) {
+    // 资产图（assetId）/ 内联矢量图（svg，0.13.0）/ 占位框 三选一
+    const sourceCount = [el.assetId, el.svg, el.placeholder].filter(v => v !== undefined).length
+    if (sourceCount !== 1) {
       issues.push({
         level: 'error',
         rule: 'IMAGE_SOURCE_INVALID',
-        message: `图片 ${elementLabel(el)} 必须且只能提供 assetId / placeholder 之一`,
+        message: `图片 ${elementLabel(el)} 必须且只能提供 assetId / svg / placeholder 之一`,
         pageId: page.id,
         elementId: el.id,
       })
@@ -457,13 +459,14 @@ export function validatePage(page: PageScene, options: PageValidateOptions = {})
       issues.push({
         level: 'error',
         rule: 'ASSET_MISSING',
-        message: `图片 ${elementLabel(el)} 引用未登记资产 ${el.assetId}，请先 ppt_asset_register 或改用 placeholder`,
+        message: `图片 ${elementLabel(el)} 引用未登记资产 ${el.assetId}，请先 ppt_asset_register、改用 placeholder，或直接给 svg 内联矢量图`,
         pageId: page.id,
         elementId: el.id,
       })
     }
     const ratio = el.w / el.h
-    if (el.fit === 'fill' && ratio > 2.8) {
+    // svg 元素框比例由引擎按 viewBox 适配（写入时已对齐），不适用 fill 拉伸告警
+    if (el.svg === undefined && el.fit === 'fill' && ratio > 2.8) {
       issues.push({ level: 'warning', rule: 'IMAGE_DISTORTION', message: `图片 ${elementLabel(el)} fit=fill 且宽高比 ${ratio.toFixed(1)} 失常，画面会被拉伸`, pageId: page.id, elementId: el.id })
     }
   }

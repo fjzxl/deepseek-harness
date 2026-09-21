@@ -28,6 +28,7 @@ import { createToolLogger, failureStreak } from '../toollog.js'
 import { requireDeckState } from '../deck-store.js'
 import type { ResolvedPptStudioConfig } from '../config.js'
 import { asRecord, oneText, resolveToolContext, type ToolDefinition } from './registry.js'
+import { deepRepair } from '../normalize.js'
 
 const STRUCTURAL_TYPES = ['cover', 'toc', 'closing'] as const
 
@@ -285,7 +286,7 @@ export function createOutlineTools(config: ResolvedPptStudioConfig): ToolDefinit
       },
       execute: async (rawArgs, exec) => {
         exec?.signal?.throwIfAborted()
-        const args = outlineArgsSchema.parse(asRecord(rawArgs))
+        const args = outlineArgsSchema.parse(asRecord(deepRepair(rawArgs)))
         const { store } = resolveToolContext(config, exec)
         const state = await requireDeckState(store, args.deckId)
         const brief = await store.loadBrief(args.deckId)
@@ -455,7 +456,7 @@ export function createOutlineTools(config: ResolvedPptStudioConfig): ToolDefinit
         exec?.signal?.throwIfAborted()
         // 报错走可读路径（真实会话教训：contentBrief 超 300 / 缺 pages 被拒时只给英文 zod 数组，模型多次重试）
         const args = (() => {
-          const parsed = sectionArgsSchema.safeParse(asRecord(rawArgs))
+          const parsed = sectionArgsSchema.safeParse(asRecord(deepRepair(rawArgs)))
           if (parsed.success) return parsed.data
           const issues = parsed.error.issues.map(i => `  ${i.path.join('.') || '(root)'}: ${i.message}`).join('\n')
           const hints: string[] = []

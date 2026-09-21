@@ -6,6 +6,8 @@ description: 制作结构化演示文稿（PPT）的完整工作室：简报（�
 # dsh-ppt-studio：PPT 制作 SOP
 
 把一次 PPT 制作拆成 0–8 九个阶段。**standard / precise 模式下每个用户确认点都必须停下来等用户答复，不得连跑；quick 模式只做一次打包确认（见下）**。
+**确认的发起方式是硬规则：凡 [用户确认]/[用户确认/修改]/[用户选定] 点，必须调 `ask_user_question` 工具**——把可选项写成 `options`（label + 一句 description，推荐项放第一个并在 label 标注「推荐」），相关问题一次合并提问（一次调用最多 4 个 question），拿到用户点选结果再调下一阶段工具。**禁止用纯文本罗列 A/B/C/D 选项让用户打字回复**（用户要点选，不是要抄写选项字母）；只有纯开放性问题（无候选可选，如"这场分享的具体场合？"）才用文本提问。
+
 核心思想：**先锁定故事，再锁定页预算，再锁定每页意图，再锁定设计系统，最后才生成视觉；修改沿依赖关系局部处理，不推倒重来。**
 
 ```
@@ -90,6 +92,8 @@ description: 制作结构化演示文稿（PPT）的完整工作室：简报（�
    - `keyMessage` 一句话核心信息（写页时的内容锚点）
    - `structure` 信息结构：timeline / comparison / process / hierarchy / cause-effect / problem-solution / before-after / concept-example / data-insight / plain（决定选哪种页型，错配会被校验器提醒）
    - `density` 页级密度意图（low/medium/high）；`visual` 配图计划（image/chart/none）
+   - **视觉优先（0.12.0）**：概念/机制/关系/数据类内容优先选**图示型页型**——process（流程）、timeline（演进）、comparison（对比）、hierarchy（层次）、image-text（图文）、chart（数据）、big-number（数字冲击）——比 bullets 纯文字页更有助理解；纯 bullets/icon-list 页控制在全册约 1/3 以内（全册校验的 TYPE_DIVERSITY/VISUAL_RHYTHM 会盯，但蓝图阶段就该选对）。
+   - **SVG 矢量插图（0.13.0，无生图接口时的配图路径）**：image-text 页直接给 `image.svg` 画矢量示意——模型自己就是"生图接口"。纪律：**简洁示意风格**（几何形状/图标/流程块/少量短标注，向整页 svg 路线看齐），`viewBox` 比例接近 5.6:4.6（如 `0 0 560 460`），颜色用锁定色板 hex，文字用 `<text>`，**禁止** script/事件属性/foreignObject/外部引用/位图风格渐变堆砌；引擎自动清洗并按 viewBox 比例适配图区（HTML 内联渲染、PPTX 矢量嵌入，PowerPoint 2016+ 显示）。一册里 svg 插图风格要统一（同一套形语言），不要页页异画风。
    - `transition` 叙事衔接（strictness=strict 时缺失升 warning，其余可选、链部分建立时缺口提示 info）：`fromPrevious` 承接上一页（回答上一页留下的钩子）+ `nextHook` 给下一页埋的钩子——PPT 是连续叙事，避免"页页都不错、连起来跳跃"
    - `evidence` 证据条目（evidenceLevel≥business 时被校验）：`[{claim 论断原文, type fact/data/example/quote, source 来源, materialId? 材料id, locator? 出处定位}]`；来源只能来自用户材料——有材料清单时优先 materialId 精确引用 + locator（如"第 12 页，表 2"），引用支持性（材料是否真支撑论断）自审把关
    - `densityOverride` 页级预算豁免（0.8.2，少用）：`{reason}` 允许单页突破全册密度/要点预算（如总结页需罗列全部要点）——校验降为 info 知情放行，不是静默绕过
@@ -112,7 +116,7 @@ description: 制作结构化演示文稿（PPT）的完整工作室：简报（�
 ## 阶段 5：Section Production——逐页生成（边生成边看）
 
 逐页 `ppt_page_write`（**按部分顺序一气写完，不逐部分停下来等确认**）。写页有两条路，**优先内容模式**：
-- **content 内容模式（0.11.0，推荐写法）**：`scene.content` 只传语义内容（标题/条目/图表数据/表格行……），版式引擎按页型模板自动展开元素清单——坐标、字号阶梯、锁定令牌色、标题条、卡片衬底全部自动套用，不会触发越界/互压/溢出类拒绝。`type` 缺省取蓝图页型、`title` 缺省取蓝图标题。各页型字段：bullets/icon-list → `items[]`；two-col/comparison → `columns:[{title,items[]}]`（两项）；process → `steps:[{name,desc}]`；timeline → `events:[{label,desc}]`；cards → `cards:[{title,desc}]`（2-4 张）；hierarchy → `layers[]`；big-number → `bigNumber:{value,unit,desc,source}`；chart → `chart:{chartType,labels[],series:[{name,values[]}],conclusion}`；table → `table:{header[],rows[][],note}`；quote → `quote:{text,source}`；image-text → `image:{assetId|prompt,heading,items[]}`；toc → `entries[]`；cover/closing → `subtitle`；`notes` 演讲者备注。示例：`{"scene":{"content":{"title":"三波浪潮","items":["符号主义","连接主义","大模型"]}}}`。文字过多时引擎自动缩字号并在回执 `[版式引擎]` 说明——仍建议精简。
+- **content 内容模式（0.11.0，推荐写法）**：`scene.content` 只传语义内容（标题/条目/图表数据/表格行……），版式引擎按页型模板自动展开元素清单——坐标、字号阶梯、锁定令牌色、标题条、卡片衬底全部自动套用，不会触发越界/互压/溢出类拒绝。`type` 缺省取蓝图页型、`title` 缺省取蓝图标题。各页型字段：bullets/icon-list → `items[]`；two-col/comparison → `columns:[{title,items[]}]`（两项）；process → `steps:[{name,desc}]`；timeline → `events:[{label,desc}]`；cards → `cards:[{title,desc}]`（2-4 张）；hierarchy → `layers[]`；big-number → `bigNumber:{value,unit,desc,source}`；chart → `chart:{chartType,labels[],series:[{name,values[]}],conclusion}`；table → `table:{header[],rows[][],note}`；quote → `quote:{text,source}`；image-text → `image:{svg:"<svg…>…</svg>"（0.13.0 推荐）或 assetId|prompt, heading, items[]}`；toc → `entries[]`；cover/closing → `subtitle`；`notes` 演讲者备注。示例：`{"scene":{"content":{"title":"三波浪潮","items":["符号主义","连接主义","大模型"]}}}`。文字过多时引擎自动缩字号并在回执 `[版式引擎]` 说明——仍建议精简。
 - **手写元素模式**（精细控制版式时）：`scene.elements` 逐元素给坐标（先读 `reference/layouts.md`），要求见下。
 - **ppt_page_skeleton 骨架**（0.11.0 写页辅助）：`ppt_page_skeleton {deckId,pageId}` 按蓝图一键生成**通过全部校验的占位页**（版式引擎 + 蓝图概要切分），立即落盘可预览；随后用 `append:true` 同 id 原位替换把占位文字换成正式内容。适合：先看页面框架再填内容、写页反复失败后的重建。
 - **写页语义（重要）**：`ppt_page_write` 默认**整页替换**——scene.elements 必须是这一页的**完整**元素清单（含标题、装饰、全部节点）。遗漏既有元素会被**拒绝保存**（报错列出丢失元素）。**增量修改优先合并语义**：`append:true` + `remove:["元素id"]`——未提及元素保留、同 id 原位替换、新 id 追加、remove 中的显式删除（不触发丢元素闸门）；整页确要删元素时也可用 `allowDrop:true`。content 内容模式是按蓝图的有意整页重写，不受丢元素闸门限制。
@@ -204,9 +208,9 @@ description: 制作结构化演示文稿（PPT）的完整工作室：简报（�
 | chart.labels / table.rows 写数字（`labels:[32,64]`） | 写字符串：`labels:["32","64"]`（数字会被自动转，但别依赖） |
 | 用主题外的自造颜色/字体 | 只用 `design/tokens.json` 锁定的色板与字体 |
 
-- 工具会自动修复：扁平 text 展开、对象包数组、数字文本转字符串、`"color=#xxx"` 损坏键拆分；修复项会在返回的 `repairs` 里列出——**看到 auto-fix 说明写法不规范，下一页请改正**。
+- 工具会自动修复：扁平 text 展开、对象包数组、数字文本转字符串、`"color=#xxx"` 损坏键拆分、`{"item":[…]}`/`{"$text":X}` XML 风格包装还原；修复项会在返回的 `repairs` 里列出——**看到 auto-fix 说明写法不规范，下一页请改正**。
 - 报错会附"出错元素原文"，照着改那一处即可，不要整体重写其他元素。
-- **熔断保护（0.10.1）**：同一工具连续失败 5 次后调用会被拦截不执行（报错变为 🚫 熔断指引）——此时原样重试已无意义：先 `ppt_doctor` 体检、`ppt_log_query {"source":"plugin"}` 看失败入参与堆栈，按失败提示真正改变前置条件再重试；熔断期间每 5 次拦截放行一次试探，修好后自动恢复。
+- **熔断保护（0.10.1 起拦截 / 0.11.2 起按入参结构分型）**：同一工具**同结构**入参连续失败 5 次后会被拦截不执行（报错变为 🚫 熔断指引）——此时原样重试已无意义：先 `ppt_doctor` 体检、`ppt_log_query {"source":"plugin"}` 看失败入参与堆栈，按失败提示真正改变前置条件再重试。**换调用方式（结构不同，如 content 模式 ↔ elements+append）不会被熔断拦截**，可放心换路；熔断期间每 5 次同构调用放行一次试探，修好后自动恢复。
 
 ## 按需参考文档
 

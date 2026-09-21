@@ -10,6 +10,8 @@
  *   5. 子代理通道：标量全部字符串化——x:"0.6"、background:"true"、z:"1"
  *   6. 子代理通道：重复元素被包成 {item:...} 对象——paragraphs:{item:{...}}、runs:{item:{...}}
  *      （重复 XML 标签 → JSON 的转换痕迹；"结构与范例一致仍报错"的元凶）
+ *   7. 标量字段被包成 {"$text": X}（XML 文本节点风格）：bullet:{"$text":"true"}、
+ *      lineSpacing:{"$text":"1.4"}（sessionlog 2026-09-20，elements 路径）
  *
  * lossless：DSH 宿主要求工具返回值可无损 JSON 化（键值不得为 undefined），
  * 所有工具返回值统一过一遍清洗。
@@ -31,11 +33,20 @@ const TEXT_ARRAY_KEYS = new Set(['labels'])
 /** 二维字符串矩阵键（表格行；内层单元格数字 → 字符串，同上真实会话教训）。 */
 const TEXT_MATRIX_KEYS = new Set(['rows'])
 
-/** 值为布尔的键（"true"/"false" 自动转回 boolean）。 */
-const BOOLEAN_KEYS = new Set(['background', 'bold', 'italic', 'headerRow', 'zebra', 'showLegend', 'showValues'])
+/** 值为布尔的键（"true"/"false" 或 {"$text":"true"} 自动转回 boolean；bullet 合法形态含 {marker} 对象，仅在值已是字符串时才转换）。 */
+const BOOLEAN_KEYS = new Set(['background', 'bold', 'italic', 'headerRow', 'zebra', 'showLegend', 'showValues', 'bullet'])
 
-/** 语义上应为数组、但可能被包成对象（{item:...} 或单对象）的键。 */
-const ARRAY_KEYS = new Set(['elements', 'paragraphs', 'runs', 'series', 'labels', 'rows', 'values', 'colors', 'colWidths', 'keyPoints', 'sections', 'openQuestions'])
+/**
+ * 语义上应为数组、但可能被包成对象（{item:...} 或单对象）的键。
+ * 后两组是 content 内容模式（autolayout）与蓝图/页数工具的字段——弱模型常把
+ * 语义数组序列化为 {"item":[...]}（XML 风格包装）；deepRepair 递归整个入参，
+ * 各嵌套层级（如 columns[].items）里的这些键同样会被还原为纯数组。
+ */
+const ARRAY_KEYS = new Set([
+  'elements', 'paragraphs', 'runs', 'series', 'labels', 'rows', 'values', 'colors', 'colWidths', 'keyPoints', 'sections', 'openQuestions',
+  'items', 'columns', 'events', 'steps', 'cards', 'layers', 'entries',
+  'parts', 'pages', 'allocation',
+])
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === 'object' && !Array.isArray(value)
@@ -77,6 +88,16 @@ export function deepRepair(value: unknown, repairCount?: { n: number }): unknown
       key = realKey
       itemValue = rest.join('=').replace(/^"+|"+$/g, '').trim()
       if (repairCount !== undefined) repairCount.n++
+    }
+
+    // 标量字段的 {"$text": X} 包装（XML 文本节点风格）→ 剥回标量，交给下方布尔/数字转换。
+    // 仅当 $text 是唯一键且内值为标量时剥离——不碰 {marker:…} 这类合法对象。
+    if (isPlainObject(itemValue) && Object.keys(itemValue).length === 1 && '$text' in itemValue) {
+      const inner = (itemValue as Record<string, unknown>)['$text']
+      if (inner !== null && (typeof inner === 'string' || typeof inner === 'number' || typeof inner === 'boolean')) {
+        itemValue = inner
+        if (repairCount !== undefined) repairCount.n++
+      }
     }
 
     // 语义数组：{item:} 包装 / 单对象 → 数组（先还原，再按数组做数字转换）
@@ -295,4 +316,51 @@ export function previewJson(value: unknown, max = 300): string {
   } catch {
     return String(value).slice(0, max)
   }
+}
+
+/**
+ * 清洗模型生成的 SVG（0.13.0，无生图接口时的配图路径）：内联进 HTML 预览前必须剥掉
+ * 可执行内容——script 块、事件属性（onload=…）、foreignObject/iframe/embed、javascript: 链接。
+ */
+export function sanitizeSvg(text: string): string {
+  return text
+    .replace(/<script[\s\S]*?<\/script\s*>/gi, '')
+    .replace(/<\/?(?:foreignObject|iframe|embed|object|use)\b[^>]*>/gi, '')
+    .replace(/\son[a-z]+\s*=\s*"[^"]*"/gi, '')
+    .replace(/\son[a-z]+\s*=\s*'[^']*'/gi, '')
+    .replace(/\son[a-z]+\s*=\s*[^\s>]+/gi, '')
+    .replace(/((?:xlink:)?href)\s*=\s*(["'])\s*javascript:[^"']*\2/gi, '$1=$2#$2')
+}
+
+/**
+ * SVG 根标签归一（供 svg 图片元素使用）：保证有 viewBox（缺省时从 width/height 属性推，
+ * 再缺省用 560×460 图区比例），并剥掉根标签的 width/height——渲染端用容器尺寸控制显示，
+ * 避免固定宽高的 svg 在框内溢出。返回 { svg, width, height }；无 <svg 根标签返回 null。
+ */
+export function normalizeSvgRoot(text: string): { svg: string; width: number; height: number } | null {
+  const open = /<svg\b([^>]*)>/i.exec(text)
+  if (open === null) return null
+  const attrs = open[1]!
+  const num = (name: string): number | undefined => {
+    const m = new RegExp(`${name}\\s*=\\s*["']\\s*([\\d.]+)\\s*["']`, 'i').exec(attrs)
+    return m !== null ? Number(m[1]) : undefined
+  }
+  let width = num('width')
+  let height = num('height')
+  const viewBox = /viewBox\s*=\s*["']\s*([-\d.]+)[\s,]+([-\d.]+)[\s,]+([-\d.]+)[\s,]+([-\d.]+)\s*["']/i.exec(attrs)
+  if (viewBox !== null) {
+    width = Number(viewBox[3])
+    height = Number(viewBox[4])
+  }
+  if (width === undefined || height === undefined || !Number.isFinite(width) || !Number.isFinite(height) || width <= 0 || height <= 0) {
+    width = 560
+    height = 460
+  }
+  // 重写根标签：只留原属性里除 width/height 外的部分，补 viewBox（已有则保留原值）
+  const keptAttrs = attrs
+    .replace(/\s(?:width|height)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    .replace(/\s*$/, '')
+  const viewBoxAttr = viewBox !== null ? ` viewBox="${viewBox[0].replace(/^viewBox\s*=\s*["']|["']$/g, '')}"` : ` viewBox="0 0 ${width} ${height}"`
+  const root = `<svg${keptAttrs}${viewBoxAttr}>`
+  return { svg: text.replace(open[0], root), width, height }
 }

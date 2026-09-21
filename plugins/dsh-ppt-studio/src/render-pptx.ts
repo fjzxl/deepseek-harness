@@ -186,6 +186,14 @@ async function addImageElement(slide: PptxSlide, el: ImageElement, input: Render
     )
     return
   }
+  // 内联矢量图（0.13.0）：与整页 svg 路线同一嵌入方式——PowerPoint 2016+ 原生显示
+  if (el.svg !== undefined) {
+    slide.addImage({
+      data: `image/svg+xml;base64,${Buffer.from(el.svg, 'utf8').toString('base64')}`,
+      ...baseOpts(el),
+    } as never)
+    return
+  }
   const asset = el.assetId !== undefined ? await readAssetBuffer(input.store, input.deckId, el.assetId) : undefined
   if (asset === undefined) {
     throw new Error(`图片元素 ${el.id} 引用的资产 ${el.assetId} 不存在（登记清单里找不到）`)

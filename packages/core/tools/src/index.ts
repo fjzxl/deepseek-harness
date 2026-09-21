@@ -440,7 +440,7 @@ export type ScheduledToolDispatch =
   | { kind: 'final-result'; result: ToolExecutionResult }
 
 /**
- * Symbol-keyed scheduler view that keeps pre/post policy ordered while
+ * String-keyed scheduler view that keeps pre/post policy ordered while
  * overlapping dispatch. Ordinary callers use {@link ToolRuntime.execute};
  * this is not a plugin extension point.
  * @internal
@@ -458,9 +458,18 @@ export interface ToolRuntimeScheduler {
 
 /**
  * Scheduler entry point omitted from the generated named service API.
+ *
+ * A string property key, not a Symbol: when the Loader resolves plugins
+ * through a dev-linked profile whose node_modules symlink into a workspace
+ * while the entry process runs TS sources through tsx, one physical file can
+ * exist as two ESM module records. A Symbol constant then differs between
+ * the record that built the ToolRuntime instance and the record the agent
+ * loop reads from, so `tools[TOOL_RUNTIME_SCHEDULER]` would silently be
+ * undefined and every tool call would crash. The string key keeps the
+ * channel private-by-obscurity while surviving duplicated records.
  * @internal
  */
-export const TOOL_RUNTIME_SCHEDULER: unique symbol = Symbol('@deepseek-ai/dsh-tools.scheduler')
+export const TOOL_RUNTIME_SCHEDULER = '@deepseek-ai/dsh-tools.scheduler'
 
 /** Canonical error code for cancellation after a tool body was invoked. */
 export const TOOL_ABORTED = 'ABORTED'

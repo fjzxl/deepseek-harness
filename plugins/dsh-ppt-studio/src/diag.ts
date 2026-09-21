@@ -120,6 +120,7 @@ export interface EnvReport {
   imageApiConfigured: boolean
   imageApiModel?: string
   pluginLogExists: boolean
+  pluginLogPath?: string
   failedSnapshotCount: number
   failedDir?: string
 }
@@ -157,6 +158,7 @@ export async function collectEnvReport(rootDir: string, config: { previewPort: n
     imageApiConfigured: config.imageApi !== undefined,
     imageApiModel: config.imageApi?.model,
     pluginLogExists: existsSync(join(rootDir, 'logs', 'plugin.log')),
+    pluginLogPath: join(rootDir, 'logs', 'plugin.log'),
     failedSnapshotCount,
     failedDir: existsSync(failedDir) ? failedDir : undefined,
   }

@@ -367,6 +367,10 @@ function imageHtml(el: ImageElement, assetData: Map<string, { mime: string; base
   if (el.placeholder !== undefined) {
     return `<div class="el ppt-placeholder" style="${baseStyle(el)}${radius}"><div class="ppt-ph-icon">🖼️</div><div class="ppt-ph-title">此处放图</div><div class="ppt-ph-prompt">${esc(el.placeholder.prompt)}</div>${el.placeholder.hint !== undefined ? `<div class="ppt-ph-hint">${esc(el.placeholder.hint)}</div>` : ''}</div>`
   }
+  // 内联矢量图（0.13.0）：落盘前已 sanitizeSvg + normalizeSvgRoot（根标签无固定宽高、带 viewBox），此处直接内联
+  if (el.svg !== undefined) {
+    return `<div class="el" style="${baseStyle(el)}${radius}overflow:hidden;">${el.svg}</div>`
+  }
   const asset = el.assetId !== undefined ? assetData.get(el.assetId) : undefined
   if (asset === undefined) {
     return `<div class="el ppt-placeholder" style="${baseStyle(el)}"><div class="ppt-ph-title">资产缺失：${esc(el.assetId ?? '?')}</div></div>`

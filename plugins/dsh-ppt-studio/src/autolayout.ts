@@ -17,6 +17,7 @@
 import { z } from 'zod'
 import { CANVAS_W_IN } from './units.js'
 import { estimateTextCapacity } from './validate.js'
+import { normalizeSvgRoot, sanitizeSvg } from './normalize.js'
 import type { ChartType, DesignTokens, PageScene, PageType, SceneElement, TextElement } from './schema.js'
 import { CHART_TYPES, PAGE_TYPES } from './schema.js'
 
@@ -63,6 +64,8 @@ export const contentInputSchema = z.object({
   image: z.object({
     assetId: z.string().max(40).optional(),
     prompt: z.string().max(120).optional(),
+    /** 模型生成的矢量插图（0.13.0）：无生图接口时的配图路径，引擎清洗 + 按 viewBox 比例适配区域 */
+    svg: z.string().min(20).max(300_000).optional(),
     heading: z.string().max(60).optional(),
     items: z.array(z.string().max(120)).max(5).optional(),
   }).optional(),
@@ -121,7 +124,7 @@ const TYPE_REQUIREMENTS: Record<PageType, string> = {
   closing: 'subtitle（联系方式/下一步，可选）',
   bullets: 'items: ["要点一","要点二"]',
   'two-col': 'columns: [{title:"左栏题",items:["…"]},{title:"右栏题",items:["…"]}]',
-  'image-text': 'image: {prompt:"配图描述"（或 assetId）, heading:"小标题", items:["要点"]}——都不给也行，会按蓝图概要生成占位',
+  'image-text': 'image: {svg:"<svg viewBox=…>矢量插图</svg>"（推荐，无生图接口时）或 prompt:"配图描述"/assetId, heading:"小标题", items:["要点"]}——都不给也行，会按蓝图概要生成占位',
   chart: 'chart: {chartType:"column",labels:["A","B"],series:[{name:"系列",values:[1,2]}],conclusion:"结论"}',
   table: 'table: {header:["列1","列2"],rows:[["a","b"]],note:"来源（可选）"}',
   quote: 'quote: {text:"引文",source:"出处（可选）"}',
@@ -234,19 +237,50 @@ class Composer {
   }
 
   bullets(items: string[]): void {
+    const boxX = 0.9, boxY = 1.7, boxW = 11.5, boxH = 5.0
+    // 左侧主色装饰竖条：纯文字页也有一点图形骨架（真实反馈：全册图形偏少）
+    this.shape({
+      x: 0.6, y: 1.8, w: 0.08, h: 4.8,
+      shape: 'rect', fill: this.C.primary, opacity: 0.5, background: true, idPrefix: 'bar-body',
+    })
+    // 稀疏自适应（0.12.0）：3 条短要点占 5 格高文本框的顶部三成、下半页全空（真实 deck p008/p013）。
+    // 确定性地三步走：字号上调（占不满时）→ 段距拉开 → 垂直居中；文字多时行为与旧版一致。
+    const draft = items.map(t => ({ text: t, bullet: true as const, spaceAfter: 10, lineSpacing: 1.35 }))
+    const measure = (fontSize: number, spaceAfter: number): number =>
+      estimateTextCapacity({
+        kind: 'text', id: 'probe', x: boxX, y: boxY, w: boxW, h: boxH,
+        fontSize, color: this.C.text, align: 'left', valign: 'top',
+        paragraphs: draft.map(p => ({ ...p, spaceAfter })),
+      } as TextElement).ratio
+    let fontSize = this.bodyFont
+    while (fontSize < 24 && measure(fontSize + 2, 10) <= 0.8) fontSize += 2
+    let spaceAfter = 10
+    let y = boxY
+    let h = boxH
+    const baseRatio = measure(fontSize, 10)
+    if (baseRatio < 0.85) {
+      const gaps = Math.max(items.length - 1, 1)
+      spaceAfter = r2(Math.min(36, 10 + (boxH * 72 * (1 - baseRatio)) / gaps))
+      const spreadRatio = measure(fontSize, spaceAfter)
+      y = r2(boxY + (boxH * Math.max(0, 1 - Math.min(spreadRatio, 1))) / 2)
+      h = r2(6.7 - y) // 框底钉在内容区下缘：居中下移后收缩高度，不越安全区
+      this.notes.push(`要点较少：字号 ${this.bodyFont}→${String(fontSize)}pt、段距 ${String(spaceAfter)}pt 并垂直居中（稀疏页不再上半页堆顶、下半页留白）`)
+    }
     this.text({
-      x: 0.9, y: 1.7, w: 11.5, h: 5.0,
-      fontSize: this.bodyFont, color: this.C.text, font: this.F.body,
-      paragraphs: items.map(t => ({ text: t, bullet: true, spaceAfter: 10, lineSpacing: 1.35 })),
+      x: boxX, y, w: boxW, h,
+      fontSize, color: this.C.text, font: this.F.body,
+      paragraphs: draft.map(p => ({ ...p, spaceAfter })),
       idPrefix: 't-body',
     })
   }
 
   iconList(items: string[]): void {
     const n = items.length
-    const step = Math.min(0.85, 4.8 / n)
+    // 0.12.0：步距上限 0.85→1.05，条目少时整块垂直居中（不再全部堆在 1.8 起的顶部）
+    const step = Math.min(1.05, 4.8 / n)
+    const y0 = r2(1.7 + Math.max(0, 4.8 - n * step) / 2)
     items.forEach((item, i) => {
-      const y = 1.8 + i * step
+      const y = y0 + i * step
       this.shape({
         x: 0.9, y: r2(y + 0.05), w: 0.5, h: 0.5,
         shape: 'ellipse', fill: this.C.primary, opacity: 0.15, background: true, idPrefix: 'ic',
@@ -305,19 +339,20 @@ class Composer {
   process(steps: Array<{ name: string; desc?: string }>): void {
     const n = steps.length
     const gap = 0.25
-    const stepW = Math.min(2.7, (12.13 - (n - 1) * gap) / n)
+    // 0.12.0：满宽排布（旧实现钳了 2.7 上限，3 步只铺 8.6/12.13，右侧空三成——真实 deck d20260921-182914 p018）
+    const stepW = r2((12.13 - (n - 1) * gap) / n)
     steps.forEach((step, i) => {
-      const x = 0.6 + i * (stepW + gap)
+      const x = r2(0.6 + i * (stepW + gap))
       const fill = i === 0 || i === n - 1 ? this.C.primary : this.C.secondary
       this.shape({
         x, y: 2.6, w: stepW, h: 1.1,
         shape: 'chevron', fill, background: true, idPrefix: 'st',
       })
       this.text({
-        x, y: 2.85, w: stepW, h: 0.6,
+        x, y: 2.75, w: stepW, h: 0.8,
         fontSize: 16, color: this.C.onPrimary, bold: true, align: 'center', valign: 'mid',
         paragraphs: [{ text: step.name }],
-        idPrefix: 'stn', fit: false,
+        idPrefix: 'stn', floor: 12,
       })
       if (step.desc !== undefined && step.desc !== '') {
         this.text({
@@ -540,20 +575,48 @@ class Composer {
     }
   }
 
-  imageText(data: { assetId?: string; prompt?: string; heading?: string; items?: string[] }, fallback: ComposeFallback): void {
-    const useAsset = data.assetId !== undefined && (fallback.knownAssetIds?.has(data.assetId) ?? false)
-    if (data.assetId !== undefined && !useAsset) {
-      this.notes.push(`assetId ${data.assetId} 未登记（ASSET_MISSING 是 error），已降级为占位框——先 ppt_asset_register / ppt_image_generate 再写页可上实图`)
+  imageText(data: { assetId?: string; prompt?: string; svg?: string; heading?: string; items?: string[] }, fallback: ComposeFallback): void {
+    const region = { x: 0.6, y: 1.7, w: 5.6, h: 4.6 }
+    // svg 内联矢量图（0.13.0）：无生图接口时的配图路径——清洗 + 根标签归一 + 按 viewBox 比例适配区域（不拉伸）
+    if (data.svg !== undefined && data.svg !== '') {
+      const normalized = normalizeSvgRoot(sanitizeSvg(data.svg))
+      if (normalized !== null) {
+        const ratio = normalized.width / normalized.height
+        let { x, y, w, h } = region
+        if (ratio > region.w / region.h) {
+          h = r2(region.w / ratio)
+          y = r2(region.y + (region.h - h) / 2)
+        } else {
+          w = r2(region.h * ratio)
+          x = r2(region.x + (region.w - w) / 2)
+        }
+        this.push({
+          kind: 'image',
+          id: this.ids.next('img'),
+          x, y, w, h,
+          svg: normalized.svg,
+          fit: 'contain',
+        })
+        this.notes.push('图区使用模型生成的 SVG 矢量插图（已清洗并按 viewBox 比例适配，PPTX 以矢量嵌入、PowerPoint 2016+ 显示）')
+      } else {
+        this.notes.push('image.svg 不是合法的 <svg> 源码（未找到根标签），已降级为占位框——请提供完整 <svg viewBox="…">…</svg>')
+        this.push({ kind: 'image', id: this.ids.next('img'), ...region, placeholder: { prompt: (data.prompt ?? fallback.contentBrief ?? '建议配图').slice(0, 120) }, fit: 'cover' })
+      }
+    } else {
+      const useAsset = data.assetId !== undefined && (fallback.knownAssetIds?.has(data.assetId) ?? false)
+      if (data.assetId !== undefined && !useAsset) {
+        this.notes.push(`assetId ${data.assetId} 未登记（ASSET_MISSING 是 error），已降级为占位框——先 ppt_asset_register / ppt_image_generate，或直接给 image.svg 内联矢量图`)
+      }
+      this.push({
+        kind: 'image',
+        id: this.ids.next('img'),
+        x: region.x, y: region.y, w: region.w, h: region.h,
+        ...(useAsset
+          ? { assetId: data.assetId }
+          : { placeholder: { prompt: (data.prompt ?? fallback.contentBrief ?? '建议配图').slice(0, 120) } }),
+        fit: 'cover',
+      })
     }
-    this.elements.push({
-      kind: 'image',
-      id: this.ids.next('img'),
-      x: 0.6, y: 1.7, w: 5.6, h: 4.6,
-      ...(useAsset
-        ? { assetId: data.assetId }
-        : { placeholder: { prompt: (data.prompt ?? fallback.contentBrief ?? '建议配图').slice(0, 120) } }),
-      fit: 'cover',
-    })
     const heading = data.heading ?? fallback.title
     this.text({
       x: 6.6, y: 1.8, w: 6.1, h: 0.6,
