@@ -2,20 +2,27 @@
  * 预览静态服务（node:http，零额外依赖）。
  *
  * 多根托管 deck 工作区：deck 按 DSH 会话工作目录生成（每个会话可能不同），本服务
- * 合并三类根目录——①启动目录（或 PPT_STUDIO_OUTPUT_DIR）②全局工作区注册表
+ * 合并两类根目录——①启动目录（或 PPT_STUDIO_OUTPUT_DIR）②全局工作区注册表
  * （~/.dsh/ppt-studio-workspaces.json，工具运行时自动登记）——任一根下的 deck 都能预览：
  *   GET /                              deck 列表页（跨全部工作区）
  *   GET /ppt-studio/<deckId>/preview/  该 deck 的自包含 HTML 播放器
  *
+ * 懒注册（0.22.0）：deck 未命中或访问列表页时重查全局工作区注册表合并新根——
+ * 新工作目录首场 PPT 之后**不再需要重启预览服务**（0.22.0 前是启动时一次性读入）。
+ *
  * 预览 HTML 无外链，本服务只是薄静态层——本地测试、Docker 内常驻均可。
  * 端口默认 3170（PPT_STUDIO_PREVIEW_PORT / 行配置 previewPort）。
  */
-import { createServer, type Server } from 'node:http'
+import { createServer, type IncomingMessage, type Server } from 'node:http'
 import { createReadStream, existsSync, readFileSync } from 'node:fs'
 import { readdir, stat } from 'node:fs/promises'
 import { extname, join, normalize, resolve } from 'node:path'
 import { resolvePptStudioConfig } from './config.js'
 import { listWorkspaces } from './workspace-registry.js'
+import { DeckStore } from './deck-store.js'
+import { renderDeckHtml } from './render-html.js'
+import { validateDeckPages } from './validate.js'
+import type { PageScene, SceneElement } from './schema.js'
 
 const MIME: Record<string, string> = {
   '.html': 'text/html; charset=utf-8',
@@ -116,22 +123,189 @@ ${multiRoot ? `<p class="hint">正在托管 ${rootDirs.length} 个工作区（de
 /** 找到 deckId 所在的工作区根目录。 */
 function findDeckRoot(rootDirs: string[], deckId: string): string | undefined {
   return rootDirs.find(root => existsSync(join(root, deckId, 'state.json')))
+}// ---------------------------------------------------------------- 就地编辑（0.21.0 P1）
+
+interface EditPatch {
+  id: string
+  x?: number
+  y?: number
+  w?: number
+  h?: number
+  texts?: string[]
+}
+
+interface EditBody {
+  pageId: string
+  edits: EditPatch[]
+}
+
+async function readJsonBody(req: IncomingMessage, limitBytes = 1_000_000): Promise<Record<string, unknown>> {
+  const chunks: Buffer[] = []
+  let size = 0
+  for await (const chunk of req) {
+    size += (chunk as Buffer).length
+    if (size > limitBytes) throw new Error('请求体超过 1MB 限制')
+    chunks.push(chunk as Buffer)
+  }
+  return JSON.parse(Buffer.concat(chunks).toString('utf8')) as Record<string, unknown>
+}
+
+const r2 = (v: number): number => Math.round(v * 100) / 100
+
+/** 把 texts 依序写进文本元素的内容槽（runs 优先，其次段落 text）。 */
+function applyTexts(el: SceneElement, texts: string[]): boolean {
+  if (el.kind !== 'text') return false
+  const paragraphs = (el as { paragraphs?: Array<{ runs?: Array<{ text: string }>; text?: string }> }).paragraphs ?? []
+  let i = 0
+  for (const p of paragraphs) {
+    if (p.runs !== undefined) {
+      for (const run of p.runs) {
+        if (i < texts.length) run.text = texts[i]!
+        i += 1
+      }
+    } else {
+      if (i < texts.length) p.text = texts[i]
+      i += 1
+    }
+  }
+  return i > 0
+}
+
+/**
+ * 应用就地编辑（0.21.0 P1，roadmap-aippt-borrowing）：播放器编辑层 POST 过来，
+ * 写前跑与 ppt_scene_check 同路的确定性校验（error 拒写），落盘 pages/<pageId>.json，
+ * 标记 handTunedPages/contentOutdated/renderOutdated（sceneHash 自然失配，需重跑
+ * ppt_scene_check + ppt_deck_render 收口），并即时重渲染预览。
+ */
+async function applyDeckEdit(deckRoot: string, deckId: string, body: EditBody): Promise<Record<string, unknown>> {
+  const store = new DeckStore(deckRoot)
+  const state = await store.loadState(deckId)
+  if (state === undefined) throw new Error(`deck ${deckId} 状态缺失`)
+  const [tokens, outline, brief, spec, manifest, pages] = await Promise.all([
+    store.loadTokens(deckId), store.loadOutline(deckId), store.loadBrief(deckId),
+    store.loadSpec(deckId), store.loadManifest(deckId), store.loadPages(deckId),
+  ])
+  if (tokens === undefined || outline === undefined) throw new Error('设计令牌或大纲缺失——就地编辑需要已锁定的 deck')
+  const page = pages.find(p => p.id === body.pageId)
+  if (page === undefined) throw new Error(`页面 ${body.pageId} 不存在`)
+  if (page.svg !== undefined) throw new Error('svg 自由绘制页不走就地编辑（文字嵌在整页源码里），请回到会话让模型改')
+
+  const applied: string[] = []
+  for (const edit of body.edits) {
+    const el = (page.elements ?? []).find(candidate => candidate.id === edit.id)
+    if (el === undefined) throw new Error(`元素 ${edit.id} 在页面 ${body.pageId} 中不存在`)
+    const box = el as { x: number; y: number; w: number; h: number }
+    if (edit.x !== undefined) box.x = r2(edit.x)
+    if (edit.y !== undefined) box.y = r2(edit.y)
+    if (edit.w !== undefined) box.w = r2(edit.w)
+    if (edit.h !== undefined) box.h = r2(edit.h)
+    if (edit.texts !== undefined && !applyTexts(el, edit.texts)) throw new Error(`元素 ${edit.id} 不是文本元素或没有内容槽`)
+    applied.push(edit.id)
+  }
+
+  const validation = validateDeckPages([page], {
+    manifest, tokens,
+    outlinePages: outline.pages,
+    parts: outline.parts,
+    evidenceLevel: brief?.evidenceLevel,
+    strictness: brief?.strictness,
+    referenceMaterials: brief?.referenceMaterials,
+    withVisualCharBudget: spec?.densityPolicy.withVisualCharBudget,
+    bulletsMax: spec?.densityPolicy.bulletsMax,
+  })
+  if (!validation.ok) {
+    const first = validation.issues.filter(i => i.level === 'error').slice(0, 5).map(i => i.message).join('；')
+    throw new Error(`编辑被确定性校验拒绝（改动未落盘）：${first}`)
+  }
+
+  await store.saveJson(join(store.paths(deckId).pagesDir, `${page.id}.json`), page)
+  const handTuned = [...new Set([...(state.handTunedPages ?? []), page.id])]
+  await store.saveState({
+    ...state,
+    handTunedPages: handTuned,
+    contentOutdated: true,
+    renderOutdated: true,
+    updatedAt: new Date().toISOString(),
+  })
+
+  // 即时重渲染预览（与 render.ts 同构：outline 过滤 + 排序 + 锁定令牌主题）
+  const orderedPages = pages
+    .filter(p => outline.pages.some(o => o.id === p.id))
+    .sort((a, b) => a.id.localeCompare(b.id))
+  const theme = {
+    colors: tokens.colors, chartColors: tokens.chartColors, fonts: tokens.fonts,
+    ...(tokens.texture !== undefined ? { texture: tokens.texture } : {}),
+    ...(tokens.structuralGradient !== undefined ? { structuralGradient: tokens.structuralGradient } : {}),
+  }
+  await renderDeckHtml({ store, deckId, deckTitle: state.title, theme, pages: orderedPages as PageScene[] })
+
+  return {
+    ok: true,
+    pageId: page.id,
+    applied,
+    handTunedPages: handTuned,
+    warnings: validation.issues.filter(i => i.level === 'warning').map(i => i.message).slice(0, 10),
+  }
 }
 
 export function startPreviewServer(options: PreviewServerOptions): Promise<RunningPreviewServer> {
-  const rootDirs = [...new Set(options.rootDirs.map(root => resolve(root)))]
+  const rootDirs = new Set(options.rootDirs.map(root => resolve(root)))
+  const currentRoots = (): string[] => [...rootDirs]
+  /** 懒注册：重查全局工作区注册表，合并新出现的工作区根（0.22.0——免重启）。 */
+  const refreshRoots = (): void => {
+    for (const root of listWorkspaces()) {
+      const abs = resolve(root)
+      if (!rootDirs.has(abs) && existsSync(abs)) rootDirs.add(abs)
+    }
+  }
+  /** 找 deck 根：内存集合未命中时重查注册表再试一次（新工作目录首场 PPT 后即可预览）。 */
+  const findRoot = (deckId: string): string | undefined => {
+    const hit = findDeckRoot(currentRoots(), deckId)
+    if (hit !== undefined) return hit
+    refreshRoots()
+    return findDeckRoot(currentRoots(), deckId)
+  }
   const server = createServer((req, res) => {
     void (async () => {
       try {
         const url = new URL(req.url ?? '/', 'http://localhost')
         const pathname = decodeURIComponent(url.pathname)
+        // 就地编辑（0.21.0 P1）：POST /ppt-studio/<deckId>/edit ——播放器编辑层回写通道
+        if (req.method === 'POST') {
+          const editMatch = /^\/ppt-studio\/([^/]+)\/edit\/?$/.exec(pathname)
+          if (editMatch === null) {
+            res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify({ ok: false, error: '路径不存在（编辑端点为 POST /ppt-studio/<deckId>/edit）' }))
+            return
+          }
+          const deckId = editMatch[1]!
+          if (!/^[A-Za-z0-9_-]+$/.test(deckId)) {
+            res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify({ ok: false, error: 'deckId 不合法' }))
+            return
+          }
+          const deckRoot = findRoot(deckId)
+          if (deckRoot === undefined) {
+            res.writeHead(404, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify({ ok: false, error: `deck ${deckId} 不存在` }))
+            return
+          }
+          try {
+            const raw = await readJsonBody(req)
+            const body = raw as unknown as EditBody
+            if (typeof body.pageId !== 'string' || !Array.isArray(body.edits)) throw new Error('请求体需要 { pageId, edits: [{id, x?, y?, w?, h?, texts?}] }')
+            const result = await applyDeckEdit(deckRoot, deckId, body)
+            res.writeHead(200, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify(result))
+          } catch (error) {
+            res.writeHead(422, { 'content-type': 'application/json; charset=utf-8' }).end(JSON.stringify({ ok: false, error: error instanceof Error ? error.message : String(error) }))
+          }
+          return
+        }
         if (req.method !== 'GET' && req.method !== 'HEAD') {
           res.writeHead(405, { 'content-type': 'text/html; charset=utf-8' }).end(errorPage(405, '不支持的请求方法', '本服务只响应 GET / HEAD 请求。'))
           return
         }
         if (pathname === '/' || pathname === '/ppt-studio' || pathname === '/ppt-studio/') {
+          refreshRoots()
           res.writeHead(200, { 'content-type': 'text/html; charset=utf-8' })
-          res.end(await listPage(rootDirs))
+          res.end(await listPage(currentRoots()))
           return
         }
         const match = /^\/ppt-studio\/([^/]+)\/preview\/?(.*)$/.exec(pathname)
@@ -144,9 +318,10 @@ export function startPreviewServer(options: PreviewServerOptions): Promise<Runni
           res.writeHead(404, { 'content-type': 'text/html; charset=utf-8' }).end(errorPage(404, 'deckId 不合法', 'deckId 只能包含字母/数字/下划线/连字符。'))
           return
         }
-        const deckRoot = findDeckRoot(rootDirs, deckId)
+        const deckRoot = findRoot(deckId)
         if (deckRoot === undefined) {
-          res.writeHead(404, { 'content-type': 'text/html; charset=utf-8' }).end(errorPage(404, `deck <code>${esc(deckId)}</code> 不存在`, `它可能已被删除，或生成它的工作区尚未登记。正在托管 ${String(rootDirs.length)} 个工作区：<ol>${rootDirs.map(r => `<li><code>${esc(r)}</code></li>`).join('') || '（无）'}</ol>deck 按会话工作目录生成——在该工作目录下完成一次任意 ppt_* 工具调用会自动登记，之后刷新本页。`))
+          const roots = currentRoots()
+          res.writeHead(404, { 'content-type': 'text/html; charset=utf-8' }).end(errorPage(404, `deck <code>${esc(deckId)}</code> 不存在`, `它可能已被删除，或生成它的工作区尚未登记。正在托管 ${String(roots.length)} 个工作区：<ol>${roots.map(r => `<li><code>${esc(r)}</code></li>`).join('') || '（无）'}</ol>deck 按会话工作目录生成——在该工作目录下完成一次任意 ppt_* 工具调用会自动登记，之后刷新本页。`))
           return
         }
         const relative = match[2] === '' ? 'index.html' : match[2]

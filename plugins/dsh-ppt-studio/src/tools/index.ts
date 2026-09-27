@@ -39,8 +39,24 @@ const ARGS_PREVIEW_MAX = 600
 
 /** 熔断阈值（0.10.1）：同一工具连续失败达到此次数后拦截后续调用，防止原样重试死循环空烧 token。ppt_section_draft 另有更低的降级阈值（0.10.3，tools/outline.ts DEGRADE_AFTER=3）：连败先转逐页累积模式，正常到不了本阈值。 */
 const BREAKER_OPEN_AFTER = 5
+/** 0.14.0：modelProfile=strong 的 deck 熔断阈值放宽——强模型的失败多为正常迭代（坐标/容量试错），
+ * 低阈值误拦的风险大于收益（0.11.2 事故的教训方向）；同结构换汤不换药的重试照样拦。 */
+const STRONG_BREAKER_OPEN_AFTER = 8
 /** 熔断期间每拦截 N 次放行一次试探调用（half-open）：前置状态被其它工具修好后试探成功即自动恢复。 */
 const BREAKER_PROBE_EVERY = 5
+
+/** 从入参提取 deckId 并查该 deck 的模型档位（0.14.0 熔断分档）。查不到按弱档（默认阈值）。 */
+async function breakerThreshold(store: import('../deck-store.js').DeckStore | undefined, rawArgs: unknown): Promise<number> {
+  if (store === undefined || rawArgs === null || typeof rawArgs !== 'object') return BREAKER_OPEN_AFTER
+  const deckId = (rawArgs as Record<string, unknown>).deckId
+  if (typeof deckId !== 'string' || deckId === '') return BREAKER_OPEN_AFTER
+  try {
+    const brief = await store.loadBrief(deckId)
+    return brief?.modelProfile === 'strong' ? STRONG_BREAKER_OPEN_AFTER : BREAKER_OPEN_AFTER
+  } catch {
+    return BREAKER_OPEN_AFTER
+  }
+}
 
 /** 包一层 execute：lossless 清洗 + 插件级调用日志 + 失败入参快照 + 连续失败熔断。 */
 function withDiagnostics(config: ResolvedPptStudioConfig, definition: ToolDefinition): ToolDefinition {
@@ -56,8 +72,9 @@ function withDiagnostics(config: ResolvedPptStudioConfig, definition: ToolDefini
       // frozen 只反映顶层；宿主深冻结时顶层必然也是 frozen，足够作为信号
       const frozen = rawArgs !== null && (typeof rawArgs === 'object' || typeof rawArgs === 'function') && Object.isFrozen(rawArgs)
       let toolLogger: ReturnType<typeof createToolLogger> | undefined
+      let store: import('../deck-store.js').DeckStore | undefined
       try {
-        const { store } = resolveToolContext(config, exec)
+        store = resolveToolContext(config, exec).store
         toolLogger = createToolLogger(store.rootDir)
       } catch { /* 解析不出工作区（异常形态的 exec）则跳过日志与熔断 */ }
 
@@ -66,12 +83,16 @@ function withDiagnostics(config: ResolvedPptStudioConfig, definition: ToolDefini
       // 0.11.2 起按结构指纹分型：同工具不同结构的调用各有独立计数——content 模式连败触发
       // 熔断后，模型改投 elements+append（结构性换路）不被旧失败连坐（session 2026-09-20
       // 曾因此被误拦 7 次、整场卡死）。
+      // 0.14.0：strong 档 deck 阈值放宽到 STRONG_BREAKER_OPEN_AFTER（查不到简报按弱档）。
       if (toolLogger !== undefined) {
         let streak: { errors: number; blocked: number } | undefined
         try {
           streak = failureStreak(await toolLogger.readTail(64), definition.name, shape)
         } catch { /* 统计失败不阻断业务 */ }
-        if (streak !== undefined && streak.errors >= BREAKER_OPEN_AFTER && (streak.blocked + 1) % BREAKER_PROBE_EVERY !== 0) {
+        const threshold = streak !== undefined && streak.errors >= BREAKER_OPEN_AFTER
+          ? await breakerThreshold(store, rawArgs)
+          : BREAKER_OPEN_AFTER
+        if (streak !== undefined && streak.errors >= threshold && (streak.blocked + 1) % BREAKER_PROBE_EVERY !== 0) {
           toolLogger.record({
             tool: definition.name,
             argsForm,
@@ -121,8 +142,9 @@ function withDiagnostics(config: ResolvedPptStudioConfig, definition: ToolDefini
           try {
             const streak = failureStreak(await logger.readTail(64), definition.name, shape)
             if (streak.errors >= 1 && error instanceof Error) {
+              const threshold = await breakerThreshold(store ?? resolveToolContext(config, exec).store, rawArgs)
               error.message += `
-（该工具对同结构入参已连续失败 ${String(streak.errors + 1)} 次：建议 ①调 ppt_doctor 体检环境；②ppt_log_query {"source":"plugin"} 查失败入参与堆栈；③连续同因失败请换调用方式（结构不同的调用不受熔断影响），不要原样重试。同结构连续失败 ${String(BREAKER_OPEN_AFTER)} 次将触发熔断，后续同构调用会被拦截。）`
+（该工具对同结构入参已连续失败 ${String(streak.errors + 1)} 次：建议 ①调 ppt_doctor 体检环境；②ppt_log_query {"source":"plugin"} 查失败入参与堆栈；③连续同因失败请换调用方式（结构不同的调用不受熔断影响），不要原样重试。同结构连续失败 ${String(threshold)} 次将触发熔断，后续同构调用会被拦截。）`
             }
           } catch { /* 统计失败不阻断抛错 */ }
           const snapshot = await logger.snapshotFailed(definition.name, rawArgs)

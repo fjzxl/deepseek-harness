@@ -11,6 +11,10 @@
  *   PPT_STUDIO_IMAGE_API_BASE       内网生图接口 baseURL（OpenAI 兼容）
  *   PPT_STUDIO_IMAGE_API_KEY        生图接口密钥
  *   PPT_STUDIO_IMAGE_API_MODEL      生图模型名
+ *
+ * 直读环境变量（不经行配置，见使用处模块头）：
+ *   PPT_STUDIO_AUDIT_BROWSER        像素自审 headless 浏览器路径（src/visual-audit.ts；缺省自动探测 Edge/Chrome）
+ *   PPT_STUDIO_VISUAL_AUDIT         =0 关闭 ppt_deck_render 自动像素自审（src/tools/render.ts）
  */
 
 /**

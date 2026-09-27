@@ -168,10 +168,11 @@ describe('composeSceneFromContent 核心不变量', () => {
     expect(body && body.kind === 'text' && body.paragraphs.length).toBe(3)
   })
 
-  it('封面背景为令牌渐变、底部装饰条存在', () => {
+  it('封面背景为纯色主底（0.15.0 弃渐变）、底部装饰条与色阶大圆存在', () => {
     const page = pageOf('cover')
-    expect(page.background?.gradient?.from).toBe(tokens.colors.primary)
+    expect(page.background?.color).toBe(tokens.colors.primary)
     expect(page.elements!.some(e => e.kind === 'shape' && e.background === true && e.y >= 7.0)).toBe(true)
+    expect(page.elements!.some(e => e.kind === 'shape' && e.id.startsWith('deco') && e.shape === 'ellipse')).toBe(true)
   })
 
   it('splitSentences 按句切分并限量', () => {

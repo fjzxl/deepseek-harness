@@ -134,7 +134,29 @@ describe('ppt_page_write content 内容模式', () => {
   })
 })
 
+describe('0.17.1 槽位前置校验', () => {
+  it('content.type 与大纲页型不符 → 立即报槽位错（真实事故：6 连败）', async () => {
+    const f = await createFixture()
+    await expect(f.pageWrite({
+      deckId: f.deckId,
+      pageId: 'p004',
+      scene: { content: { type: 'timeline', title: '演进', events: [{ label: '2019', desc: '事件' }, { label: '2021', desc: '事件' }] } },
+    })).rejects.toThrow(/槽位不匹配.*p004.*bullets/)
+  })
+})
+
 describe('content 内容模式的 {item:} 包装容错', () => {
+  /** 0.16.0 槽位契约：改写某页页型前先同步大纲（OUTLINE_PAGE_MISMATCH 是 error） */
+  async function retypifyFixturePage(f: Fixture, pageId: string, type: string): Promise<void> {
+    const outlinePath = f.store.paths(f.deckId).outline
+    const outline = JSON.parse(readFileSync(outlinePath, 'utf8'))
+    const target = outline.pages.find((pg: { id: string }) => pg.id === pageId)
+    target.type = type
+    target.title = type === 'two-col' ? '对比' : 'AI 三波浪潮'
+    await f.store.saveJson(outlinePath, outline)
+  }
+
+
   // 真实会话（2026-09-20 d20260920-234200-0442）：模型把语义数组序列化为 {"item":[...]}
   // （XML 风格包装），三页连败触发熔断。deepRepair 应在 content 路径同样还原为纯数组。
   it('bullets：content.items 为 {item:[...]} 时自动还原并落盘', async () => {
@@ -153,6 +175,7 @@ describe('content 内容模式的 {item:} 包装容错', () => {
 
   it('two-col：content.columns 与嵌套 columns[].items 均为 {item:} 包装时还原', async () => {
     const f = await createFixture()
+    await retypifyFixturePage(f, 'p004', 'two-col')
     const result = (await f.pageWrite({
       deckId: f.deckId,
       pageId: 'p004',
@@ -168,6 +191,7 @@ describe('content 内容模式的 {item:} 包装容错', () => {
 
   it('timeline：content.events 为 {item:} 包装时还原', async () => {
     const f = await createFixture()
+    await retypifyFixturePage(f, 'p004', 'timeline')
     const result = (await f.pageWrite({
       deckId: f.deckId,
       pageId: 'p004',

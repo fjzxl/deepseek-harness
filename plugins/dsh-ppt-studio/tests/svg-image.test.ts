@@ -32,6 +32,8 @@ describe('normalizeSvgRoot', () => {
     expect(r.width).toBe(400)
     expect(r.height).toBe(300)
     expect(r.svg).toContain('viewBox="0 0 400 300"')
+    // 0.17.2：重写后的根标签有且只有一个 viewBox（双定义浏览器容忍、resvg 拒绝）
+    expect((r.svg.match(/viewBox/g) ?? []).length).toBe(1)
     expect(r.svg).not.toMatch(/<svg[^>]*\swidth=/)
     expect(r.svg).toContain('<rect width="10" height="10"/>') // 非根标签的 width/height 不动
   })
@@ -84,8 +86,8 @@ describe('image-text svg 分支（composeSceneFromContent）', () => {
       tokens,
     )
     const img = wide.elements.find(e => e.kind === 'image') as { w: number; h: number }
-    expect(img.w).toBeCloseTo(5.6, 1) // 宽受限
-    expect(img.h).toBeCloseTo(5.6 / (1120 / 460), 1)
+    expect(img.w).toBeCloseTo(5.46, 1) // 宽受限（0.17.0 layout.split 默认 45% × 12.13）
+    expect(img.h).toBeCloseTo(5.46 / (1120 / 460), 1)
     expect(img.w / img.h).toBeCloseTo(1120 / 460, 1)
   })
 

@@ -87,13 +87,14 @@ const textElementSchema = {
 
 const shapeElementSchema = {
   type: 'object',
-  description: '形状元素（卡片衬底请加 background:true）',
+  description: '形状元素（卡片衬底请加 background:true）。16 种形状（0.14.0 扩充）；rotation 可旋转做角标/徽章/斜切装饰——大角度旋转请加 background:true（校验按未旋转外接框计算）',
   properties: {
     ...baseProps,
     kind: { type: 'string', enum: ['shape'] },
-    shape: { type: 'string', enum: ['rect', 'roundRect', 'ellipse', 'triangle', 'diamond', 'chevron', 'rightArrow', 'pentagon', 'line'] },
+    shape: { type: 'string', enum: ['rect', 'roundRect', 'ellipse', 'triangle', 'diamond', 'chevron', 'rightArrow', 'pentagon', 'line', 'hexagon', 'parallelogram', 'trapezoid', 'leftArrow', 'upArrow', 'downArrow', 'star5'] },
     fill: { description: '#RRGGBB 或渐变 {from,to,angle}', oneOf: [colorProp, { type: 'object', properties: { from: colorProp, to: colorProp, angle: { type: 'number' } }, required: ['from', 'to'] }] },
     opacity: { type: 'number', description: '0-1' },
+    rotation: { type: 'number', description: '旋转角（度，顺时针，-180~180）：装饰形状专用（角标/徽章/斜切色块），内容形状避免大角度' },
     border: { type: 'object', properties: { color: colorProp, width: { type: 'number' }, style: { type: 'string', enum: ['solid', 'dashed'] } }, required: ['color', 'width'] },
     radius: { type: 'number', description: 'roundRect 圆角（短边百分比 0-50），默认 12' },
   },
@@ -111,6 +112,7 @@ const imageElementSchema = {
     placeholder: { type: 'object', properties: { prompt: { type: 'string', description: '建议配图说明' }, hint: { type: 'string' } }, required: ['prompt'] },
     fit: { type: 'string', enum: ['cover', 'contain', 'fill'], description: '默认 cover；fill 会拉伸慎用' },
     radius: { type: 'number', description: '圆角（短边百分比 0-50）' },
+    rotation: { type: 'number', description: '旋转角（度，顺时针，-180~180）：装饰性配图专用' },
   },
   required: ['kind', 'id', 'x', 'y', 'w', 'h'],
 }
@@ -173,8 +175,11 @@ const WEAK_ASSIST_GUIDE =
  * 写页失败出口调用：ppt_page_write 连续失败 ≥WEAK_ASSIST_AFTER 次时落闩锁（deck 级持久）
  * 并返回 🔔 用户通知文本。与 0.10.3 逐页降级同模式：症状是原样重试死循环，治法是
  * 确定性地换一条对弱模型更友好的生成路径（内容模式/骨架+增量），不再指望模型自己改对坐标。
+ * 0.14.0：modelProfile=strong 的 deck 不自动开启（强模型偶发失败是正常迭代，
+ * 闩锁的降级语义反而碍事）；已开启的旧闩锁仍被尊重（显式 overrideAssist 可恢复）。
  */
-async function bumpWeakModelAssist(store: DeckStore, state: DeckState): Promise<string | undefined> {
+async function bumpWeakModelAssist(store: DeckStore, state: DeckState, enabled: boolean): Promise<string | undefined> {
+  if (!enabled) return undefined
   if (state.weakModelAssist !== undefined) return undefined
   let streakErrors = 0
   try {
@@ -199,15 +204,16 @@ export function createPageTools(config: ResolvedPptStudioConfig): ToolDefinition
       name: 'ppt_page_write',
       description:
         'PPT 制作第 5 步：写入（或修改）单页场景，**按简报的渲染路线二选一**（0.10.0）——' +
-        'native 路线（默认）有两种写法：**scene.content 内容模式（0.11.0，推荐，弱模型必用）**——只传标题/条目/图表数据等语义内容，版式引擎按页型模板自动展开元素清单（坐标/字号/锁定令牌/标题条全部自动），不会触发越界/互压/溢出类拒绝；' +
-        '或 scene.elements 手写元素清单（**默认整页替换**，遗漏既有元素会被**拒绝保存**；增量优先 `append:true` + `remove:[id]` 合并语义——每元素 kind + id + x,y,w/h 英寸坐标，坐标与版式规则务必先读 layouts.md）。' +
+        'native 路线（默认）有两种写法：**scene.content 内容模式**——只传标题/条目/图表数据等语义内容，版式引擎按页型模板自动展开元素清单（坐标/字号/锁定令牌/标题条全部自动），不会触发越界/互压/溢出类拒绝（标准 deck 快路径；modelProfile=weak 时主路径）；' +
+        '或 scene.elements 手写元素清单（**modelProfile=strong 的主路径**——强模型直接做精细版式设计；**默认整页替换**，遗漏既有元素会被**拒绝保存**；增量优先 `append:true` + `remove:[id]` 合并语义——每元素 kind + id + x,y,w/h 英寸坐标，坐标与版式规则务必先读 layouts.md）。' +
         'svg 路线（brief.renderRoute="svg"）：scene.svg 提供整页 SVG 源码（`<svg viewBox="0 0 1280 720">`，整页替换语义、无 append），HTML 预览原生内联、PPTX 端整页矢量图嵌入（PowerPoint 2016+），只校验安全面（SVG_UNSAFE：脚本/外链/foreignObject 禁止）、画布（SVG_VIEWSIZE）与锁定色板——版式确定性规则不适用，写完务必 ppt_preview_update 肉眼把关。' +
         '**公式排版**（手写元素时）：用 runs 的 superscript/subscript（QK^T → "QK"+sup(T)；d_k → "d"+sub(k)），不要写 Unicode ᵀ（中文字体缺字形显示为方框）或字面 ^/_ 记法。' +
         'chart.labels 与 table.rows 写字符串（数字刻度/单元格也写 "32" 这样的字符串）。' +
         '写入时先做容错归一（扁平 text 自动展开、对象自动包数组、{"item":[…]} 包装自动还原为纯数组——content 的 items/columns/events/steps/cards/layers/entries 同样适用、{"$text":X} 标量包装自动剥回（bullet/lineSpacing 等）、数字文本自动转字符串、labels/rows 数字自动转字符串、"key=#hex" 损坏键自动拆分），' +
         '再执行确定性校验（越界/文本互压/文字容量/图片登记/锁定令牌/信息密度/证据来源），有 error 时拒绝保存并返回问题清单与出错元素原文。' +
         '颜色与字体只能用 design/tokens.json 锁定的令牌；有主视觉（图/图表）的页面文字要精炼（DENSITY_WITH_VISUAL 会按 spec 预算提醒）。' +
-        '**弱模型辅助模式**：写页连续失败 3 次后自动开启——裸 elements 整页替换被拒绝，只能用 content 内容模式或 ppt_page_skeleton 骨架 + append 小步增量（🔔 通知需转述用户）。中文：写入/更新单页 PPT 场景（内容模式 / native 元素 / 整页 SVG）。',
+        '**手写元素排版纪律（0.14.0，elements 模式必读）**：① 文字容量自估——CJK 字宽 ≈ 字号pt×1.35/72 英寸、Latin ≈ ×0.7/72，行高 ≈ 字号pt×1.8/72（默认行距 1.25）；按框宽数折行、框高留一行余量，宁可框大勿让文字溢出。② 间距下限——文字距卡片边 ≥0.08in、大标题与副标题 ≥0.2in、同列堆叠文本块 ≥0.05in。③ 反 AI 味铁律——禁卡片左侧细竖条/卡片顶部色条/标题旁小短条（层级用底色深浅、字重、字号对比表达）；全页一套主色+一套辅色，对比多实体不搞彩虹卡（区分实体靠命名与字重）；无装饰角块与无意义短线；封面禁止"一行大标题+一行副标题"平铺——要有视觉锚点（大色块/几何构图/超大数字/主图）。④ 内容铺满画布——不要挤在上半页留大片空白；文字与图在版式允许内尽量放大。' +
+        '**弱模型辅助模式**（modelProfile=weak 时）：写页连续失败 3 次后自动开启——裸 elements 整页替换被拒绝，只能用 content 内容模式或 ppt_page_skeleton 骨架 + append 小步增量（🔔 通知需转述用户；strong 档不自动开启）。中文：写入/更新单页 PPT 场景（内容模式 / native 元素 / 整页 SVG）。',
       parameters: {
         type: 'object',
         properties: {
@@ -228,8 +234,8 @@ export function createPageTools(config: ResolvedPptStudioConfig): ToolDefinition
                 type: 'object',
                 description:
                   '内容模式（0.11.0 版式引擎）：只传语义内容，插件按页型模板自动排版，产物走与手写页相同的全部校验。' +
-                  'title 可省略（取蓝图标题）。各页型取用字段：bullets/icon-list → items:["要点一","要点二"]；two-col/comparison → columns:[{title,items:[…]}]（两项）；' +
-                  'process → steps:[{name,desc}]；timeline → events:[{label,desc}]；cards → cards:[{title,desc}]（2-4 张）；hierarchy → layers:["顶层","中层","底层"]；' +
+                  'title 可省略（取蓝图标题）。各页型取用字段：bullets/icon-list → items:["要点一","要点二"]（icon-list 可选 icons:["rocket","shield"] 与 items 平行，缺省按条目文本自动选图标——词表见 SKILL.md）；two-col/comparison → columns:[{title,items:[…]}]（两项）；' +
+                  'process → steps:[{name,desc}]；timeline → events:[{label,desc,icon?}]；cards → cards:[{title,desc,icon?}]（2-4 张，icon 可选：图标名见 SKILL.md）；hierarchy → layers:["顶层","中层","底层"]；' +
                   'big-number → bigNumber:{value:"5",unit:"倍",desc:"含义",source?}；chart → chart:{chartType:"column",labels:[…],series:[{name,values:[…]}],conclusion?}；' +
                   'table → table:{header:[…],rows:[[…]],note?}；quote → quote:{text,source?}；image-text → image:{svg:"<svg viewBox=…>矢量插图</svg>"（推荐，无生图接口时）或 assetId/prompt, heading?, items?}；' +
                   'toc → entries:["章节一","章节二"]；cover/closing → subtitle；notes 为演讲者备注（可选）',
@@ -252,7 +258,7 @@ export function createPageTools(config: ResolvedPptStudioConfig): ToolDefinition
                 type: 'array',
                 minItems: 1,
                 maxItems: 24,
-                description: '1-24 个元素；每个元素 kind 必须是 text/shape/image/chart/table 之一（手写坐标模式——优先考虑 content 内容模式）',
+                description: '1-24 个元素；每个元素 kind 必须是 text/shape/image/chart/table 之一（手写坐标模式——modelProfile=strong 的主路径；weak 档优先 content 内容模式。排版纪律：CJK 字宽≈字号pt×1.35/72 in、行高≈字号pt×1.8/72 in，数折行留一行余量；文字距卡片边≥0.08in；全页一套主色+一套辅色，禁卡片左竖条/顶部色条/彩虹卡）',
                 items: { oneOf: elementSchemaAnyOf },
               },
             },
@@ -272,6 +278,17 @@ export function createPageTools(config: ResolvedPptStudioConfig): ToolDefinition
               lines.push(`✅ 页面 ${String(v.pageId)} 已保存（追加 ${String(v.appended)} 个元素，现共 ${String(v.elementCount)} 个；错误 0，警告 ${String(v.warningCount)}）。`)
             } else {
               lines.push(`✅ 页面 ${String(v.pageId)} 已保存（错误 0，警告 ${String(v.warningCount)}）。`)
+            }
+            // 0.14.0 成功路径回审计摘要（借鉴 genoffice 的 layout-audit 习惯）：
+            // 全过给显式 ✅；有 warning 时点名版面类问题建议当页即改，不要攒到最后
+            const warnRules = new Set(issues.map(raw => String(asRecord(raw).rule ?? '')))
+            const layoutWarnings = ['TEXT_OVERFLOW_RISK', 'TEXT_SEVERE_OVERFLOW', 'ELEMENT_OVERLAP', 'BG_OUT_OF_CANVAS', 'IMAGE_DISTORTION', 'READABILITY'].filter(r => warnRules.has(r))
+            if (Number(v.warningCount ?? 0) === 0) {
+              lines.push('版式审计 ✅ 全部通过（无 error / 无 warning）。')
+            } else if (layoutWarnings.length > 0) {
+              lines.push(`版式审计 ⚠️ 该页存在版面类 warning（${layoutWarnings.join('、')}）：建议当页即改（append:true 调坐标/字号/精简文字）再写下一页，不要攒到全册校验。`)
+            } else {
+              lines.push('版式审计 ✅ 版面规则通过；其余 warning 属知情项（密度/令牌/证据类），向用户交付时按需说明。')
             }
           } else {
             lines.push(`❌ 页面 ${String(v.pageId)} 未通过校验，未保存：`)
@@ -358,10 +375,12 @@ export function createPageTools(config: ResolvedPptStudioConfig): ToolDefinition
           )
         }
 
+        // 0.14.0：strong 档不自动落弱模型闩锁（失败是正常迭代，换路 SOP 由报错指引承担）
+        const weakAssistEnabled = brief?.modelProfile !== 'strong'
         if (contentMode) {
           const parsedContent = contentInputSchema.safeParse(rawContent)
           if (!parsedContent.success) {
-            const weakNotice = await bumpWeakModelAssist(store, state0)
+            const weakNotice = await bumpWeakModelAssist(store, state0, weakAssistEnabled)
             const details = parsedContent.error.issues.map(i => `  content.${i.path.join('.') || '(root)'}: ${i.message}`).join('\n')
             throw new Error(
               'scene.content 不符合内容 schema（扁平字段，按页型取用，title/type 可省略）：\n' + details +
@@ -369,6 +388,19 @@ export function createPageTools(config: ResolvedPptStudioConfig): ToolDefinition
               '\n\n示例（要点页）：{"scene":{"content":{"items":["要点一","要点二"]}}}' +
               '\n示例（图表页）：{"scene":{"content":{"chart":{"chartType":"column","labels":["Q1","Q2"],"series":[{"name":"营收","values":[10,20]}],"conclusion":"结论"}}}}' +
               (weakNotice !== undefined ? `\n\n${weakNotice}` : ''),
+            )
+          }
+          // 0.17.1 槽位前置校验：content.type 与大纲页型不符立即给方向明确的报错。
+          // 真实事故 d20260922-234438：模型把 bullets 内容写进 two-col 槽位，报错只说
+          // "two-col 需要 columns"（槽位型字段），不提 type 不符——模型连败 6 次。
+          if (parsedContent.data.type !== undefined && parsedContent.data.type !== outlinePage.type) {
+            const weakNotice2 = await bumpWeakModelAssist(store, state0, weakAssistEnabled)
+            throw new Error(
+              `槽位不匹配：大纲中 ${args.pageId} 的页型是 ${outlinePage.type}，但 content.type=${parsedContent.data.type}。二选一：\n` +
+              `  1. 按槽位页型给内容字段——${outlinePage.type} 需要 ${TYPE_REQUIREMENTS[outlinePage.type] ?? '对应字段'}；\n` +
+              `  2. 确要改这页的页型，先重调 ppt_section_draft 把蓝图改为 ${parsedContent.data.type} 再写页。\n` +
+              '原样重发相同参数永远不会成功。' +
+              (weakNotice2 !== undefined ? `\n\n${weakNotice2}` : ''),
             )
           }
           const composed = composeSceneFromContent(parsedContent.data, {
@@ -452,7 +484,7 @@ export function createPageTools(config: ResolvedPptStudioConfig): ToolDefinition
               return raw === undefined ? null : `elements[${index}] = ${previewJson(raw)}`
             })
             .filter((v): v is string => v !== null)
-          const weakNotice = await bumpWeakModelAssist(store, state0)
+          const weakNotice = await bumpWeakModelAssist(store, state0, weakAssistEnabled)
           throw new Error(
             '页面场景不符合 schema（元素定义见工具参数 schema 的 elements.items）：\n' + details +
             (hints.length > 0 ? '\n\n修复提示：\n' + hints.map(h => `  - ${h}`).join('\n') : '') +
@@ -470,6 +502,7 @@ export function createPageTools(config: ResolvedPptStudioConfig): ToolDefinition
           manifest,
           tokens,
           visualPlan: outlinePage.visual,
+          outlineType: outlinePage.type,
           structure: outlinePage.structure,
           withVisualCharBudget: spec?.densityPolicy.withVisualCharBudget,
           bulletsMax: spec?.densityPolicy.bulletsMax,
@@ -483,7 +516,7 @@ export function createPageTools(config: ResolvedPptStudioConfig): ToolDefinition
         const logger = createDeckLogger(store.paths(args.deckId).root, args.deckId)
         if (!result.ok) {
           logger.warn('page', `页面 ${args.pageId} 校验未通过（${result.errorCount} 错误）`, { issues: result.issues })
-          const weakNotice = await bumpWeakModelAssist(store, state0)
+          const weakNotice = await bumpWeakModelAssist(store, state0, weakAssistEnabled)
           return { pageId: args.pageId, ok: false, errorCount: result.errorCount, warningCount: result.warningCount, issues: result.issues, repairs, ...(weakNotice !== undefined ? { weakAssistNotice: weakNotice } : {}) }
         }
 
@@ -492,7 +525,7 @@ export function createPageTools(config: ResolvedPptStudioConfig): ToolDefinition
         // 证明模型会忽略 warning 继续走；丢元素必须显式确认（allowDrop:true）才放行。
         if (droppedIds.length > 0 && args.allowDrop !== true) {
           logger.warn('page', `页面 ${args.pageId} 整页替换将丢弃 ${droppedIds.length} 个既有元素，已拒绝`, { droppedIds })
-          const weakNotice = await bumpWeakModelAssist(store, state0)
+          const weakNotice = await bumpWeakModelAssist(store, state0, weakAssistEnabled)
           throw new Error(
             `整页替换会丢弃 ${droppedIds.length} 个既有元素（${droppedIds.slice(0, 8).join('、')}${droppedIds.length > 8 ? '…' : ''}），已拒绝保存。三选一：\n` +
               '  1. 补齐：把这些元素（含内容）一起放进 scene.elements 重新提交（整页替换要求完整清单）；\n' +

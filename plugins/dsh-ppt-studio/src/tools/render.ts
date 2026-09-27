@@ -4,6 +4,7 @@
 import { z } from 'zod'
 import { renderDeckPptx } from '../render-pptx.js'
 import { renderDeckHtml } from '../render-html.js'
+import { auditDeckPages, type DeckVisualAuditResult } from '../visual-audit.js'
 import { computeSceneHash, requireDeckState } from '../deck-store.js'
 import { describePptxModule } from '../diag.js'
 import { openPreviewOncePerDeck } from '../open-browser.js'
@@ -39,6 +40,23 @@ export function createRenderTools(config: ResolvedPptStudioConfig): ToolDefiniti
           const notes = Array.isArray(v.renderNotes) ? v.renderNotes : []
           if (notes.length > 0) lines.push(`渲染取舍：${notes.join('；')}`)
           if (v.warningCount !== undefined && Number(v.warningCount) > 0) lines.push(`注意：仍有 ${String(v.warningCount)} 条 warning 级版式提醒（详见 report.json）。`)
+          const audit = asRecord(v.visualAudit)
+          if (audit !== undefined) {
+            const auditIssues = Array.isArray(audit.issues) ? audit.issues.map(asRecord) : []
+            const audited = Array.isArray(audit.pagesAudited) ? audit.pagesAudited.length : 0
+            const note = typeof audit.note === 'string' ? audit.note : undefined
+            if (auditIssues.length > 0) {
+              lines.push(`像素自审（headless 截图 ${audited} 页，warning 级、不拦渲染）：`)
+              for (const issue of auditIssues.slice(0, 12)) {
+                lines.push(`  [${String(issue.pageId)}] ${String(issue.message)}（截图：preview/audit/${String(issue.pageId)}.png，预览 URL 拼该相对路径可看）`)
+              }
+              lines.push('以上是像素层提醒，与结构校验相互独立——建议逐条看截图确认；确需修的页改完后重新 ppt_scene_check + ppt_deck_render。')
+            } else if (note !== undefined) {
+              lines.push(`像素自审跳过：${note}`)
+            } else {
+              lines.push(`像素自审：${audited} 页截图分析通过（无失衡/空白提醒），截图在 preview/audit/ 下可肉眼复核。`)
+            }
+          }
           if (v.autoOpened === true) lines.push('已自动打开浏览器预览（本 deck 只自动打开这一次；完全关闭设 PPT_STUDIO_PREVIEW_AUTO_OPEN=0，每次都打开设 =always）。')
           lines.push('请把预览链接给用户查看；用户提出修改时改完页面后重新 ppt_scene_check + ppt_deck_render。')
           lines.push('（QA 边界：本流程已验证场景数据、文件结构与校验规则；办公软件实际渲染效果（字体回退/换行/图表标签）请以 HTML 预览与打开 PPTX 的肉眼复核为准。）')
@@ -86,8 +104,15 @@ export function createRenderTools(config: ResolvedPptStudioConfig): ToolDefiniti
         }
 
         const logger = createDeckLogger(store.paths(args.deckId).root, args.deckId)
-        // 渲染主题 = 锁定令牌（不再运行时解析主题/覆盖色板，所见即锁定）
-        const theme = { colors: tokens.colors, chartColors: tokens.chartColors, fonts: tokens.fonts }
+        // 渲染主题 = 锁定令牌（不再运行时解析主题/覆盖色板，所见即锁定；texture 为 0.18.0 背景纹理；
+        // structuralGradient 为 0.19.0 结构页渐变端点，旧 deck 缺省时渲染器回退 primary→secondary 派生）
+        const theme = {
+          colors: tokens.colors,
+          chartColors: tokens.chartColors,
+          fonts: tokens.fonts,
+          ...(tokens.texture !== undefined ? { texture: tokens.texture } : {}),
+          ...(tokens.structuralGradient !== undefined ? { structuralGradient: tokens.structuralGradient } : {}),
+        }
         const started = Date.now()
         // 渲染前诊断：模块解析路径 + 互操作形态（"PptxGenJS is not a constructor" 类故障的一手证据）
         logger.info('render', '渲染环境诊断', {
@@ -101,6 +126,14 @@ export function createRenderTools(config: ResolvedPptStudioConfig): ToolDefiniti
         const htmlResult = await logger.timed('render', '渲染 HTML 预览', () =>
           renderDeckHtml({ store, deckId: args.deckId, deckTitle: state.title, theme, pages }),
         )
+        // 视觉自审（0.22.0 T3-4）：逐页 headless 截图 + 像素启发式，warning 级提醒——
+        // 不进校验闸门、不影响产物；浏览器缺失/失败静默降级。PPT_STUDIO_VISUAL_AUDIT=0 可关。
+        const visualAudit: DeckVisualAuditResult =
+          process.env.PPT_STUDIO_VISUAL_AUDIT === '0'
+            ? { browser: '(已关闭)', pagesAudited: [], skippedPages: pages.map(p => p.id), issues: [], reports: [], durationMs: 0, note: '像素自审已通过 PPT_STUDIO_VISUAL_AUDIT=0 关闭' }
+            : await logger.timed('render', '视觉自审（headless 截图）', () =>
+              auditDeckPages({ store, deckId: args.deckId, theme, pages }),
+            )
         const durationMs = Date.now() - started
         const previewUrl = `${resolved.previewBaseUrl.replace(/\/+$/, '')}/ppt-studio/${args.deckId}/preview/`
 
@@ -122,6 +155,13 @@ export function createRenderTools(config: ResolvedPptStudioConfig): ToolDefiniti
             const result = validation.pageResults.find(r => r.pageId === p.id)
             return { pageId: p.id, type: p.type, title: p.title, errors: result?.errorCount ?? 0, warnings: result?.warningCount ?? 0 }
           }),
+          visualAudit: {
+            browser: visualAudit.browser,
+            pagesAudited: visualAudit.pagesAudited,
+            skippedPages: visualAudit.skippedPages,
+            issues: visualAudit.issues,
+            ...(visualAudit.note !== undefined ? { note: visualAudit.note } : {}),
+          },
         }
         const reportPath = await writeDeckReport(store.paths(args.deckId).root, report)
 
@@ -132,7 +172,7 @@ export function createRenderTools(config: ResolvedPptStudioConfig): ToolDefiniti
         // 自动打开浏览器：默认每 deck 只弹第一次（previewOpenedAt 标记在 helper 内落盘，
         // 必须放在上面的 saveState 之后，否则旧 state 会覆盖标记）
         const autoOpened = await openPreviewOncePerDeck(store, args.deckId, previewUrl, resolved.previewAutoOpen, 'render')
-        logger.info('render', '整册渲染完成', { pptxBytes: pptxResult.bytes, htmlBytes: htmlResult.bytes, durationMs, autoOpened })
+        logger.info('render', '整册渲染完成', { pptxBytes: pptxResult.bytes, htmlBytes: htmlResult.bytes, durationMs, autoOpened, visualAuditIssues: visualAudit.issues.length, visualAuditedPages: visualAudit.pagesAudited.length })
 
         return {
           deckId: args.deckId,
@@ -144,6 +184,13 @@ export function createRenderTools(config: ResolvedPptStudioConfig): ToolDefiniti
           reportPath,
           warningCount: validation.warningCount,
           renderNotes: pptxResult.notes,
+          visualAudit: {
+            browser: visualAudit.browser,
+            pagesAudited: visualAudit.pagesAudited,
+            skippedPages: visualAudit.skippedPages,
+            issues: visualAudit.issues,
+            ...(visualAudit.note !== undefined ? { note: visualAudit.note } : {}),
+          },
         }
       },
     },

@@ -34,7 +34,7 @@ const TEXT_ARRAY_KEYS = new Set(['labels'])
 const TEXT_MATRIX_KEYS = new Set(['rows'])
 
 /** 值为布尔的键（"true"/"false" 或 {"$text":"true"} 自动转回 boolean；bullet 合法形态含 {marker} 对象，仅在值已是字符串时才转换）。 */
-const BOOLEAN_KEYS = new Set(['background', 'bold', 'italic', 'headerRow', 'zebra', 'showLegend', 'showValues', 'bullet'])
+const BOOLEAN_KEYS = new Set(['background', 'bold', 'italic', 'headerRow', 'zebra', 'showLegend', 'showValues', 'bullet', 'visualAudit'])
 
 /**
  * 语义上应为数组、但可能被包成对象（{item:...} 或单对象）的键。
@@ -44,7 +44,7 @@ const BOOLEAN_KEYS = new Set(['background', 'bold', 'italic', 'headerRow', 'zebr
  */
 const ARRAY_KEYS = new Set([
   'elements', 'paragraphs', 'runs', 'series', 'labels', 'rows', 'values', 'colors', 'colWidths', 'keyPoints', 'sections', 'openQuestions',
-  'items', 'columns', 'events', 'steps', 'cards', 'layers', 'entries',
+  'items', 'columns', 'events', 'steps', 'cards', 'layers', 'entries', 'icons',
   'parts', 'pages', 'allocation',
 ])
 
@@ -356,9 +356,12 @@ export function normalizeSvgRoot(text: string): { svg: string; width: number; he
     width = 560
     height = 460
   }
-  // 重写根标签：只留原属性里除 width/height 外的部分，补 viewBox（已有则保留原值）
+  // 重写根标签：只留原属性里除 width/height 外的部分，补 viewBox（统一由下方
+  // viewBoxAttr 提供——原 viewBox 必须一并剥掉，否则根标签出现两个 viewBox，
+  // 浏览器容忍但 resvg 等严格解析器直接拒绝）
   const keptAttrs = attrs
     .replace(/\s(?:width|height)\s*=\s*("[^"]*"|'[^']*'|[^\s>]+)/gi, '')
+    .replace(/\sviewBox\s*=\s*("[^"]*"|'[^']*')/gi, '')
     .replace(/\s*$/, '')
   const viewBoxAttr = viewBox !== null ? ` viewBox="${viewBox[0].replace(/^viewBox\s*=\s*["']|["']$/g, '')}"` : ` viewBox="0 0 ${width} ${height}"`
   const root = `<svg${keptAttrs}${viewBoxAttr}>`

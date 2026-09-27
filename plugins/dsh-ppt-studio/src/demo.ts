@@ -448,7 +448,7 @@ async function main(): Promise<void> {
   console.log(`预览:      ${render.previewUrl}`)
   console.log(`报告:      ${render.reportPath}`)
   console.log('启动预览服务：npm run preview  （然后打开上面的预览链接）')
-  console.log('说明：封面/结尾渐变在 PPTX 端回退为纯色（渲染备注已记录）；图表为原生可编辑图表。')
+  console.log('说明：结构页为纯色主底+色阶分层装饰（0.15.0 双端一致）；图表为原生可编辑图表。')
 
   // 顺带自检：PPTX 确实存在且为 ZIP
   const pptxBytes = readFileSync(render.pptxPath)

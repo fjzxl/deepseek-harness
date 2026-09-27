@@ -148,6 +148,8 @@ export interface DeckReport {
   validation: { ok: boolean; errorCount: number; warningCount: number; issues: unknown[] }
   render: { pptxPath?: string; previewPath?: string; durationMs?: number; pptxBytes?: number; notes: string[] }
   pages: Array<{ pageId: string; type: string; title?: string; errors: number; warnings: number }>
+  /** 像素自审摘要（0.22.0 T3-4；浏览器缺失时 note 说明） */
+  visualAudit?: { browser: string; pagesAudited: string[]; skippedPages: string[]; issues: Array<{ pageId: string; rule: string; level: string; message: string }>; note?: string }
 }
 
 /** 原子写入 report.json。 */

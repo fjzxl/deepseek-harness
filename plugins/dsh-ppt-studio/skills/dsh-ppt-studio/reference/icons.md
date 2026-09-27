@@ -1,0 +1,91 @@
+# 内置图标词表（0.18.0）
+
+> content 字段取值：icon-list 的 icons[]（与 items 平行）、cards[].icon、events[].icon。
+> 缺省按条目文本关键词确定性自动选（本表第二列即匹配词）；显式给名必须是本表第一列之一。
+> 图标为统一线稿风格（24×24 / stroke 2.4 / round），颜色自动取锁定令牌，不需要也不允许指定颜色。
+
+| 图标名 | 关键词（自动选词依据） |
+|---|---|
+| target | 目标、指标、kpi、靶、瞄准、目的、对标、target、okr |
+| rocket | 启动、发射、上线、发布、启动会、项目、rocket、launch、kickoff |
+| lightbulb | 想法、洞察、创新、灵感、建议、启发、创意、点子、idea、insight、innovation |
+| users | 团队、人员、组织、员工、队伍、群体、员工、user、team、staff、people |
+| user | 个人、账户、本人、用户画像、user、account、profile |
+| chart-column | 数据、统计、图表、柱状、对比数据、bar、chart、data、stat |
+| chart-line | 趋势、走势、曲线、折线、变化、line、trend、curve |
+| chart-pie | 占比、份额、比例图、饼图、构成、pie、share、proportion |
+| trending-up | 增长、上升、提升、上涨、增益、up、growth、increase、gain |
+| trending-down | 下降、回落、下跌、降低、衰减、down、decline、decrease、drop |
+| check | 完成、通过、达成、就绪、正确、done、ok、pass、complete |
+| check-circle | 验收、合格、成功、确认、达成率、success、verified、pass |
+| warning | 风险、注意、告警、警告、隐患、预警、warning、risk、alert、caution |
+| info | 说明、提示、须知、备注、注、info、note、tip |
+| question | 疑问、问题、困惑、挑战、难题、question、issue、problem、faq |
+| gear | 设置、配置、机制、参数、系统设置、gear、setting、config |
+| wrench | 工具、维护、修复、运维、检修、tool、fix、maintain、repair |
+| cloud | 云、云端、云服务、云计算、cloud、saas |
+| database | 数据库、存储、数据资产、库表、database、storage、db |
+| server | 服务器、主机、机房、节点机、server、host、machine |
+| shield | 安全、保障、防护、风控、防御、信息安全、shield、security、protect、defense |
+| lock | 锁定、权限、保密、加密、口令、lock、privacy、encrypt、permission |
+| key | 关键、密钥、要点钥匙、核心、关键点、key、core、keyword |
+| link | 链接、关联、连接、联动、协同、集成、link、connect、integrate |
+| globe | 全球、国际、网络、跨境、全球版、globe、global、world、network |
+| map-pin | 位置、地点、区域、属地、现场、选址、location、site、region |
+| calendar | 日程、时间、日期、排期、计划、calendar、schedule、date |
+| clock | 时长、耗时、周期、工时、时效、clock、time、duration、hour |
+| mail | 邮件、联系、反馈、信箱、通知、mail、email、contact |
+| phone | 电话、热线、客服、 mobile、phone、hotline、call |
+| chat | 对话、沟通、答疑、访谈、交流、chat、dialog、talk、qa |
+| book | 知识、学习、教材、读书、课程资料、book、knowledge、learn、study |
+| pen | 撰写、编辑、修订、编写、笔、edit、write、revise、draft |
+| search | 调研、检索、排查、搜索、分析、search、research、find |
+| filter | 筛选、过滤、分层筛选、降噪、filter、funnel |
+| star | 亮点、优秀、评分、重点推荐、星级、star、highlight、rating |
+| heart | 关怀、喜爱、公益、爱心、满意度、heart、care、love |
+| award | 荣誉、表彰、资质、奖项、勋章、award、honor、medal、prize |
+| trophy | 奖杯、夺冠、成绩、冠军、胜利、trophy、win、champion、victory |
+| flag | 里程碑、标记、旗帜、节点、flag、milestone |
+| tag | 标签、分类、专题、词条、tag、label、category |
+| clipboard | 清单、任务、检查表、待办、盘点、checklist、task、todo、inventory |
+| folder | 归档、目录、资料、文档集、folder、archive |
+| file | 文档、报告、文件、材料、file、document、report |
+| box | 产品、交付、封装、制品、物料、box、product、package、deliver |
+| cart | 采购、销售、订单、购物、cart、order、purchase、shop |
+| coin | 资金、预算、成本、费用、金额、money、cost、budget、fund |
+| wallet | 财务、经费、营收、收支、wallet、finance、revenue |
+| percent | 比例、百分比、折扣、率、percent、ratio、discount |
+| gift | 福利、礼包、权益、赠品、优惠、gift、benefit、bonus |
+| zap | 提速、能效、闪电、快速、高效、zap、fast、energy、efficiency |
+| cpu | 算力、芯片、处理器、核心、cpu、chip、compute |
+| monitor | 桌面、终端、大屏、监控屏、monitor、desktop、screen |
+| smartphone | 移动、手机、端、app、mobile、phone |
+| wifi | 网络、信号、无线、联网、wifi、wireless、signal |
+| code | 开发、代码、研发、编程、code、develop、dev |
+| terminal | 命令、脚本、控制台、命令行、terminal、cli、console |
+| git-branch | 分支、版本、迭代、演进、branch、version、git |
+| layers | 架构、分层、层级、堆叠、layers、architecture、stack |
+| grid | 矩阵、板块、网格、四象限、grid、matrix、module |
+| list | 条目、清单、列表、罗列、list、items |
+| eye | 观察、监督、审查、监测、洞察、eye、watch、monitor、observe |
+| thumbs-up | 认可、好评、点赞、满意度、口碑、like、approve、praise |
+| refresh | 更新、迭代、循环、刷新、重构、refresh、update、cycle、loop |
+| download | 下载、导入、落地、领取、download、import |
+| upload | 上传、提交、上报、报送、upload、submit、report |
+| share | 分享、传播、共享、分发、share、spread、distribute |
+| play | 播放、演示、放映、直播、play、demo、video |
+| camera | 拍摄、影像、记录、照片、camera、photo、record |
+| image | 配图、图像、素材、图片、image、picture、photo |
+| mic | 演讲、发言、音频、主播、mic、audio、speech、voice |
+| home | 首页、主页、总部、驻地、home、main、hq |
+| building | 企业、机构、园区、楼宇、单位、building、company、org |
+| factory | 制造、生产、工厂、产线、factory、manufacture、production |
+| leaf | 环保、绿色、可持续、低碳、leaf、green、eco |
+| sun | 亮点、白昼、日照、明、sun、bright |
+| moon | 夜间、静默、月、夜间时段、moon、night |
+| compass | 方向、战略、指引、导航、定位、compass、strategy、direction |
+| puzzle | 集成、拼合、协同配合、puzzle、integrate |
+| scale | 对比、平衡、权衡、博弈、scale、balance、compare |
+| flame | 热度、火爆、燃烧、热搜、flame、hot、trend |
+| bookmark | 收藏、关注、订阅、书签、bookmark、follow |
+| workflow | 流程、工作流、编排、pipeline、workflow、flow |

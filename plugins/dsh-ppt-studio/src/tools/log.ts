@@ -116,6 +116,8 @@ export function createLogTools(config: ResolvedPptStudioConfig): ToolDefinition[
             const flags: string[] = []
             if (d.contentOutdated === true) flags.push('⚠️ 内容已变更，需重新 ppt_scene_check')
             if (d.renderOutdated === true) flags.push('⚠️ 已校验未渲染，需 ppt_deck_render')
+            const handTuned = Array.isArray(d.handTunedPages) ? d.handTunedPages : []
+            if (handTuned.length > 0) flags.push(`✍️ ${String(handTuned.length)} 页经预览就地手动微调（${handTuned.join('、')}）——模型重写这些页前必须与用户确认，避免覆盖手改`)
             if (d.architectureRevisedAt != null) flags.push('架构已修订，需重走 2–5')
             if (d.paused === true) flags.push('已暂停')
             const pagewise = asRecord(d.draftPagewise)

@@ -128,6 +128,15 @@ export const textElementSchema = z.object({
   paragraphs: z.array(paragraphSchema).min(1).max(15),
 })
 
+/**
+ * 形状词汇表（0.14.0 扩充对齐 OOXML 预设名；0.21.0 P3 再扩 10 种）：
+ * 基础 9 种 + 强模型表达面 7 种 + 常用图示 10 种（八角/十字/空心圆/方框/圆柱/
+ * 水滴/饼/闪电/云/心——装饰与示意场景的高频 OOXML 预设）。
+ * 全部有 pptxgenjs 原生 ShapeType 与 HTML 双端实现（多边形用 clip-path polygon，
+ * 曲线/空心形状用 objectBoundingBox SVG clipPath），所见即所得。
+ * 词表纪律：按需增量放开（AiPPT geometry.js 187 种全量不做——数据表受 GPL 约束，
+ * 且词表越长弱模型越易误用）。
+ */
 export const SHAPE_TYPES = [
   'rect',
   'roundRect',
@@ -138,6 +147,23 @@ export const SHAPE_TYPES = [
   'rightArrow',
   'pentagon',
   'line',
+  'hexagon',
+  'parallelogram',
+  'trapezoid',
+  'leftArrow',
+  'upArrow',
+  'downArrow',
+  'star5',
+  'octagon',
+  'plus',
+  'donut',
+  'frame',
+  'can',
+  'teardrop',
+  'pie',
+  'lightningBolt',
+  'cloud',
+  'heart',
 ] as const
 export const shapeTypeSchema = z.enum(SHAPE_TYPES)
 
@@ -148,6 +174,12 @@ export const shapeElementSchema = z.object({
   shape: shapeTypeSchema,
   fill: z.union([colorSchema, gradientSchema]).optional(),
   opacity: z.number().min(0).max(1).optional(),
+  /**
+   * 旋转角（度，顺时针，-180~180；0.14.0 强模型表达面）——主要给装饰形状
+   * （角标/徽章/斜切色块）。注意：校验器的越界/互压检查按未旋转外接框计算，
+   * 大角度旋转的装饰元素建议加 background:true 豁免，内容元素避免大角度旋转。
+   */
+  rotation: z.number().min(-180).max(180).optional(),
   border: z
     .object({
       color: colorSchema,
@@ -158,6 +190,23 @@ export const shapeElementSchema = z.object({
     .optional(),
   /** roundRect 圆角半径（短边百分比 0-50），默认 12 */
   radius: z.number().min(0).max(50).optional(),
+  /**
+   * 卡片/面板轻阴影（0.15.0）：PPTX outer shadow 与 HTML box-shadow 双端一致。
+   * 省略字段取渲染器默认（color=黑、opacity=0.16、blur=7pt、angle=90 正下、offset=2pt）。
+   */
+  shadow: z
+    .object({
+      color: colorSchema.optional(),
+      /** 不透明度（0.05-0.5） */
+      opacity: z.number().min(0.05).max(0.5).optional(),
+      /** 模糊半径（磅） */
+      blur: z.number().min(1).max(16).optional(),
+      /** 投影方向角（度；0=右、90=正下，与 OOXML/pptxgenjs 一致） */
+      angle: z.number().min(0).max(360).optional(),
+      /** 偏移距离（磅） */
+      offset: z.number().min(0.5).max(8).optional(),
+    })
+    .optional(),
 })
 
 /** 图片来源约束（assetId/placeholder 二选一）与图表数据约束在 validate.ts 中做确定性校验。 */
@@ -180,6 +229,8 @@ export const imageElementSchema = z.object({
   fit: fitSchema.default('cover'),
   /** 圆角（短边百分比 0-50） */
   radius: z.number().min(0).max(50).optional(),
+  /** 旋转角（度，顺时针，-180~180；0.14.0 强模型表达面，装饰性用途） */
+  rotation: z.number().min(-180).max(180).optional(),
 })
 
 export const CHART_TYPES = ['column', 'bar', 'line', 'area', 'pie', 'doughnut'] as const
@@ -279,6 +330,18 @@ export const generationModeEnum = z.enum(['quick', 'standard', 'precise'])
 export type GenerationMode = z.infer<typeof generationModeEnum>
 
 /**
+ * 模型档位（0.14.0，正交旋钮——与 confirmStages/evidenceLevel/strictness 互不耦合）：
+ * weak = 弱模型（默认，维持既有防御性 SOP：content 内容模式优先、骨架+小步增量、
+ *        连败兜底/熔断低阈值）；
+ * strong = 强模型（结构化输出可靠、长输出不截断）——写页以 elements 手写精细版式为主路径
+ *        （content 模式保留为标准 deck 快路径），未指定 mode 时默认 quick，
+ *        弱模型辅助闩锁不再自动开启、熔断阈值放宽（8 次）。
+ * 该档位只改「推荐路径与防御机制的激进程度」，不改任何校验规则与内网红线。
+ */
+export const modelProfileEnum = z.enum(['weak', 'strong'])
+export type ModelProfile = z.infer<typeof modelProfileEnum>
+
+/**
  * 证据等级：none=不要求来源；business=数字论断需有来源；
  * academic=fact/data 型论断全部需来源。内网环境来源只能来自用户提供的材料。
  */
@@ -310,6 +373,16 @@ export type ReferenceMaterial = z.infer<typeof referenceMaterialSchema>
  */
 export const renderRouteEnum = z.enum(['native', 'svg'])
 export type RenderRoute = z.infer<typeof renderRouteEnum>
+
+/**
+ * 视觉风格（0.16.0，用户在阶段 0 选择）：整套 deck 的图文配比取向。
+ * visual = 图文优先：内容页 visual∈{image,chart} 占比目标 ≥1/3（VISUAL_RATIO_LOW 强制提醒），
+ *          image-text 页必须给 image.svg 矢量插图或已登记资产——不允许只出占位框；
+ * balanced = 均衡（默认）：图文占比 ≥1/5 提醒，视觉节奏规则照常；
+ * text = 文字优先：不要求配图，VISUAL_RHYTHM 降为 info（讲义/答辩等纯文字场景）。
+ */
+export const visualStyleEnum = z.enum(['text', 'balanced', 'visual'])
+export type VisualStyle = z.infer<typeof visualStyleEnum>
 
 /** 自定义确认点（0.8.1）：覆盖三档模式的默认闸门，SOP 按此生成分支。 */
 export const confirmStageEnum = z.enum(['brief', 'outline', 'pageplan', 'blueprint', 'design', 'prototype'])
@@ -345,8 +418,12 @@ export const deckBriefSchema = z.object({
   density: densityEnum.default('normal'),
   /** 生成模式（quick/standard/precise，见 generationModeEnum；驱动 SOP 闸门数量） */
   mode: generationModeEnum.default('standard'),
+  /** 模型档位（0.14.0）：weak=弱模型防御性 SOP（默认）；strong=强模型——elements 主路径、quick 默认、防御放宽 */
+  modelProfile: modelProfileEnum.default('weak'),
   /** 渲染路线（0.10.0）：native=pptxgenjs 原生元素（默认）；svg=自由 SVG 绘制（PPTX 端整页矢量图嵌入） */
   renderRoute: renderRouteEnum.default('native'),
+  /** 视觉风格（0.16.0）：visual=图文优先（配比硬指标）；balanced=均衡（默认）；text=文字优先（不要求配图） */
+  visualStyle: visualStyleEnum.default('balanced'),
   /** 证据等级（none/business/academic；驱动 EVIDENCE_SOURCE_MISSING 校验严格度） */
   evidenceLevel: evidenceLevelEnum.default('none'),
   /** 校验强度（relaxed/normal/strict；strict 把令牌/证据类 warning 升为 error，relaxed 把认知负荷类降为 info） */
@@ -484,7 +561,7 @@ export const deckPlanSchema = z.object({
         sectionId: z.string().regex(/^s\d{1,2}$/),
         pages: z.number().int().min(1),
         /** 分配理由（模型给出，展示给用户，便于接受或调整） */
-        reason: z.string().max(120).optional(),
+        reason: z.string().max(200).optional(),
       }),
     )
     .default([]),
@@ -506,12 +583,60 @@ export const themeColorsSchema = z.object({
 export type ThemeColors = z.infer<typeof themeColorsSchema>
 
 /**
+ * 色阶（0.15.0）：primary/secondary/accent 相对页面底色的深浅梯度。
+ * 50-400 向 bg 方向渐浅（卡片底/浅色块），500=基色本身，600-900 向反方向加深（强调/描边）。
+ * 由 buildDesignTokens 从解析后的色板确定性计算；optional 兼容旧 deck 的 tokens.json
+ * （缺色阶时版式引擎回落到 8 基色，不产生新 warning）。
+ */
+export const tintScaleSchema = z.object({
+  '50': colorSchema,
+  '100': colorSchema,
+  '200': colorSchema,
+  '300': colorSchema,
+  '400': colorSchema,
+  '600': colorSchema,
+  '700': colorSchema,
+  '800': colorSchema,
+  '900': colorSchema,
+})
+export type TintScale = z.infer<typeof tintScaleSchema>
+
+/**
+ * 页面背景纹理（0.18.0，可选）：渲染器注入的低透明度 SVG 纹样（不是页面元素，
+ * 不影响 sceneHash）。kind 由主题决定（dots 点阵 / diagonal 斜线 / lattice 窗棂），
+ * color 取色阶、opacity 低于水印阈值；旧 deck 的 tokens.json 无此字段 = 无纹理。
+ */
+export const TEXTURE_CONFIG_KINDS = ['dots', 'diagonal', 'lattice'] as const
+export const textureConfigSchema = z.object({
+  kind: z.enum(TEXTURE_CONFIG_KINDS),
+  color: colorSchema,
+  /** 纹样不透明度（0.05-0.6；高于 0.6 会与内容争视觉） */
+  opacity: z.number().min(0.05).max(0.6),
+})
+export type TextureConfig = z.infer<typeof textureConfigSchema>
+
+/**
  * e-1 步产出的「全 deck 锁定」令牌（design/tokens.json）。
  * 渲染器与写页校验器共同消费：改页只能用这里的颜色/字体，锚点与栅格从这里读。
  */
 export const designTokensSchema = z.object({
   themeId: z.string().min(1).max(40),
   colors: themeColorsSchema,
+  /** 色阶（0.15.0，可选——旧 deck 无此字段时版式回落 8 基色） */
+  tints: z
+    .object({
+      primary: tintScaleSchema,
+      secondary: tintScaleSchema,
+      accent: tintScaleSchema,
+    })
+    .optional(),
+  /** 背景纹理（0.18.0，可选——无此字段时渲染器不注入底纹） */
+  texture: textureConfigSchema.optional(),
+  /**
+   * 结构页（封面/章节/结尾）渐变端点（0.19.0，可选——深色锚封面主题定义）。
+   * 缺省时结构页渐变回退 primary→secondary 派生，旧 deck 重渲染观感与旧版一致
+   */
+  structuralGradient: z.object({ from: colorSchema, to: colorSchema, angle: z.number().min(0).max(360) }).optional(),
   chartColors: z.array(colorSchema).min(4).max(6),
   fonts: z.object({ title: z.string().min(1).max(60), body: z.string().min(1).max(60) }),
   /** 字号阶梯（磅） */
@@ -605,6 +730,8 @@ export const deckStateSchema = z.object({
     .optional(),
   /** 内容过期：有页变更但尚未 ppt_scene_check（deck_status 直观提示"需重新校验"） */
   contentOutdated: z.boolean().optional(),
+  /** 经预览就地编辑（0.21.0 P1）手动微调过的页——模型整页重写前应先确认，避免覆盖用户手改 */
+  handTunedPages: z.array(idSchema).optional(),
   /** 渲染过期：已校验（或已渲染后内容又变更）但尚未 ppt_deck_render（提示"需重新渲染"） */
   renderOutdated: z.boolean().optional(),
   /** 架构修订标记（outline_draft revise:true 原地改故事的时间；修订后必须重走 2-5） */

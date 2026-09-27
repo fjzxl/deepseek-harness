@@ -32,6 +32,14 @@ import { deepRepair } from '../normalize.js'
 
 const STRUCTURAL_TYPES = ['cover', 'toc', 'closing'] as const
 
+/** 0.17.0 扉页扩容判定：多出恰好 1 页且列表含 section 型（章节扉页）→ 自动扩容分配与总页数。 */
+export function isSectionOverflow(allocatedPages: number | undefined, incomingPages: ReadonlyArray<{ type: string }>): boolean {
+  return allocatedPages !== undefined
+    && incomingPages.length === allocatedPages + 1
+    && incomingPages.some(page => page.type === 'section')
+}
+
+
 /** 逐页蓝图降级阈值（0.10.3）：ppt_section_draft 连续失败达到此次数后进入逐页累积模式（低于 tools/index.ts 的熔断阈值 5——降级把失败转为接受，正常到不了熔断）。 */
 const DEGRADE_AFTER = 3
 
@@ -411,6 +419,15 @@ export function createOutlineTools(config: ResolvedPptStudioConfig): ToolDefinit
             `进度：内容页 ${String(progress.contentPages) ?? '?'}/${String(progress.contentTarget) ?? '?'}，` +
               `结构页（封面/目录/结尾）：${String(progress.structuralDone ?? '?')}/3。`,
           )
+          if (v.budgetExpanded === true) {
+            lines.push(
+              '📐 扉页扩容：本次多出的 1 页章节扉页已自动计入（该部分分配与总页数 +1，内容页一页没砍）。' +
+                '请把这一点告知用户：总页数增加了 1 页，交付前如不需要扉页可统一调减。',
+            )
+          }
+          if (Array.isArray(v.visualNotes)) {
+            for (const note of v.visualNotes) lines.push(`⚠️ visual 归一：${String(note)}`)
+          }
           const replaced = typeof v.replaced === 'number' ? v.replaced : 0
           if (replaced > 0) {
             lines.push(
@@ -563,16 +580,39 @@ export function createOutlineTools(config: ResolvedPptStudioConfig): ToolDefinit
           }
         }
 
-        // 分配硬校验：plan 有确认分配时各部分页数必须精确匹配
+        // 分配硬校验：plan 有确认分配时各部分页数必须精确匹配。
+        // 0.17.0 扉页扩容通道：多出恰好 1 页且列表里有 section 型（章节扉页）→ 自动把该部分分配 +1
+        // 并同步增大总页数（真实事故 d20260922-225312：模型为塞扉页砍掉内容页，最终 PAGE_MISSING）。
+        // 扉页不该挤内容预算——加页，用户在交付前统一调减。
+        let budgetExpanded = false
         if (!isStructural) {
           const allocated = plan.allocation.find(a => a.sectionId === args.sectionId)
           if (pagewise === undefined) {
-            if (allocated !== undefined && allocated.pages !== args.pages.length) {
+            const overBySectionPage = allocated !== undefined && isSectionOverflow(allocated.pages, args.pages)
+            if (overBySectionPage && allocated !== undefined) {
+              allocated.pages += 1
+              plan.contentPages += 1
+              plan.totalPages += 1
+              await store.saveJson(store.paths(args.deckId).plan, plan)
+              budgetExpanded = true
+            } else if (allocated !== undefined && allocated.pages !== args.pages.length) {
+              // 0.18.1：缺页/多页分开给定向补救动作——弱模型对"提供 N 个对象"这类抽象指令
+              // 执行不稳（d20260925-190258 靠模型自行理解才补齐），缺页场景按用户已确认的
+              // 分配补足是默认正解，调减分配属于偏离用户确认的兜底，必须排在第二并声明代价。
+              const diff = allocated.pages - args.pages.length
+              const direction =
+                diff > 0
+                  ? `缺 ${diff} 页。补救：在本次已传入 ${args.pages.length} 页的基础上【再生成 ${diff} 个新 page 对象】` +
+                    `（按本章叙事选合适的页型），凑满 ${allocated.pages} 个后一次重交——` +
+                    '本工具对同一部分是整段覆盖，重交时必须带全部页，不能只补缺的。'
+                  : `多 ${-diff} 页。补救：从本次传入的页里【删掉 ${-diff} 个信息量最低的页】，` +
+                    `剩 ${allocated.pages} 个后重交。`
               throw new Error(
-                `部分 ${args.sectionId} 需要 ${allocated.pages} 页（当前传入 ${args.pages.length} 页），与确认的分配不一致；` +
-                  `请为 ${args.sectionId} 提供 ${allocated.pages} 个 page 对象后重试，` +
-                  `或先重调 ppt_pageplan_confirm 把 ${args.sectionId} 的分配改为 ${args.pages.length} 页。` +
-                  '这是参数校验拒绝：原样重发相同参数永远不会成功，必须先按本提示改参。',
+                `部分 ${args.sectionId} 需要 ${allocated.pages} 页（当前传入 ${args.pages.length} 页），${direction}` +
+                  `备选（仅当内容确实撑不满/挤不下时）：先重调 ppt_pageplan_confirm 把 ${args.sectionId} 的分配改为 ${args.pages.length} 页——` +
+                  '这会改变用户已确认的总页数，必须先向用户说明并征得同意。' +
+                  '这是参数校验拒绝：原样重发相同参数永远不会成功，必须先按本提示改参。' +
+                  '（例外：多出恰好 1 页且为章节扉页 type:section 时自动扩容分配与总页数，不需要砍内容页。）',
               )
             }
           } else {
@@ -603,14 +643,24 @@ export function createOutlineTools(config: ResolvedPptStudioConfig): ToolDefinit
         } else {
           kept = outline.pages.filter(p => p.sectionId !== args.sectionId)
         }
-        const incoming: OutlinePage[] = args.pages.map(page => outlinePageSchema.parse({
-          ...page,
-          id: 'pXXX',
-          sectionId: args.sectionId,
-          structure: page.structure ?? 'plain',
-          density: page.density ?? 'medium',
-          visual: page.visual ?? 'none',
-        }))
+        // 0.17.1 visual 归一：结构页型（cover/toc/section/closing）compose 不产 image 元素，
+        // visual:image 挂在它们身上必然 VISUAL_PLAN_UNMET（真实事故：cover 标了 visual:image 只能落占位）。
+        const visualNotes: string[] = []
+        const incoming: OutlinePage[] = args.pages.map(page => {
+          let visual = page.visual ?? 'none'
+          if (visual !== 'none' && ['cover', 'toc', 'section', 'closing'].includes(page.type)) {
+            visualNotes.push(`「${String(page.title ?? page.type).slice(0, 18)}」（${page.type}）：visual:${visual} 挂在了结构页型上——结构页不放图，已改为 none；要配图请用 image-text 页型`)
+            visual = 'none'
+          }
+          return outlinePageSchema.parse({
+            ...page,
+            id: 'pXXX',
+            sectionId: args.sectionId,
+            structure: page.structure ?? 'plain',
+            density: page.density ?? 'medium',
+            visual,
+          })
+        })
         const merged: DeckOutline = { ...outline, pages: [...kept, ...incoming] }
 
         const contentCount = merged.pages.filter(p => p.sectionId !== 's0').length
@@ -690,6 +740,8 @@ export function createOutlineTools(config: ResolvedPptStudioConfig): ToolDefinit
           pages: renumbered.pages.filter(p => p.sectionId === args.sectionId),
           progress: { contentPages: contentCount, contentTarget: plan.contentPages, structuralDone, partsDone, partsTotal: outline.parts.length },
           ...(replacedCount > 0 ? { replaced: replacedCount } : {}),
+          ...(budgetExpanded ? { budgetExpanded: true } : {}),
+          ...(visualNotes.length > 0 ? { visualNotes } : {}),
           ...(pagewiseActive && activeLatch !== undefined
             ? {
               pagewise: {

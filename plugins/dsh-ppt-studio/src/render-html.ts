@@ -12,9 +12,11 @@ import { mkdir, rename, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import type { ChartElement, ImageElement, PageScene, SceneElement, ShapeElement, TableElement, TextElement } from './schema.js'
 import type { ResolvedTheme } from './themes.js'
+import { structuralGradient } from './themes.js'
 import type { DeckStore } from './deck-store.js'
 import { CANVAS_H_IN, CANVAS_W_IN, inToPx, ptToPx } from './units.js'
 import { readAssetBuffer } from './assets.js'
+import { renderTextureSvg } from './texture.js'
 
 export interface RenderHtmlInput {
   store: DeckStore
@@ -59,6 +61,47 @@ const CLIP_PATHS: Record<string, string> = {
   chevron: 'polygon(0% 0%, 75% 0%, 100% 50%, 75% 100%, 0% 100%, 25% 50%)',
   rightArrow: 'polygon(0% 25%, 70% 25%, 70% 0%, 100% 50%, 70% 100%, 70% 75%, 0% 75%)',
   pentagon: 'polygon(50% 0%, 100% 38%, 82% 100%, 18% 100%, 0% 38%)',
+  // 0.14.0 强模型表达面扩充（与 OOXML 预设几何近似的多边形，双端视觉一致）
+  hexagon: 'polygon(25% 0%, 75% 0%, 100% 50%, 75% 100%, 25% 100%, 0% 50%)',
+  parallelogram: 'polygon(25% 0%, 100% 0%, 75% 100%, 0% 100%)',
+  trapezoid: 'polygon(20% 0%, 80% 0%, 100% 100%, 0% 100%)',
+  leftArrow: 'polygon(100% 25%, 30% 25%, 30% 0%, 0% 50%, 30% 100%, 30% 75%, 100% 75%)',
+  upArrow: 'polygon(50% 0%, 100% 30%, 75% 30%, 75% 100%, 25% 100%, 25% 30%, 0% 30%)',
+  downArrow: 'polygon(25% 0%, 75% 0%, 75% 70%, 100% 70%, 50% 100%, 0% 70%, 25% 70%)',
+  star5: 'polygon(50% 0%, 61% 35%, 98% 35%, 68% 57%, 79% 91%, 50% 70%, 21% 91%, 32% 57%, 2% 35%, 39% 35%)',
+  // 0.21.0 P3：直线多边形新形状（CSS clip-path polygon 直接表达）
+  octagon: 'polygon(29% 0%, 71% 0%, 100% 29%, 100% 71%, 71% 100%, 29% 100%, 0% 71%, 0% 29%)',
+  plus: 'polygon(36% 0%, 64% 0%, 64% 36%, 100% 36%, 100% 64%, 64% 64%, 64% 100%, 36% 100%, 36% 64%, 0% 64%, 0% 36%, 36% 36%)',
+  lightningBolt: 'polygon(62% 0%, 28% 56%, 47% 56%, 34% 100%, 76% 42%, 54% 42%, 72% 0%)',
+  // 0.21.0 P3：曲线/空心形状引用 SHAPE_CLIP_DEFS 的 objectBoundingBox SVG clipPath
+  donut: 'url(#pptx-shape-donut)',
+  frame: 'url(#pptx-shape-frame)',
+  can: 'url(#pptx-shape-can)',
+  teardrop: 'url(#pptx-shape-teardrop)',
+  pie: 'url(#pptx-shape-pie)',
+  cloud: 'url(#pptx-shape-cloud)',
+  heart: 'url(#pptx-shape-heart)',
+}
+
+/**
+ * 曲线/空心形状的 SVG clipPath 定义（0.21.0 P3）：clipPathUnits=objectBoundingBox
+ * （坐标 0-1 相对各元素自身包围盒），注入播放器一次、全页元素引用。
+ * 路径按 OOXML 预设几何自写（近似），不搬 GPL 库的 geometryMap 数据表。
+ */
+const SHAPE_CLIP_DEFS = `<svg id="pptx-shape-defs" width="0" height="0" aria-hidden="true"><defs>` +
+  '<clipPath id="pptx-shape-donut" clipPathUnits="objectBoundingBox"><path clip-rule="evenodd" d="M0 0.5 A0.5 0.5 0 1 1 1 0.5 A0.5 0.5 0 1 1 0 0.5 Z M0.25 0.5 A0.25 0.25 0 1 0 0.75 0.5 A0.25 0.25 0 1 0 0.25 0.5 Z"/></clipPath>' +
+  '<clipPath id="pptx-shape-frame" clipPathUnits="objectBoundingBox"><path clip-rule="evenodd" d="M0 0 H1 V1 H0 Z M0.22 0.22 H0.78 V0.78 H0.22 Z"/></clipPath>' +
+  '<clipPath id="pptx-shape-can" clipPathUnits="objectBoundingBox"><path d="M0 0.18 A0.5 0.18 0 0 1 1 0.18 L1 0.82 A0.5 0.18 0 0 1 0 0.82 Z"/></clipPath>' +
+  '<clipPath id="pptx-shape-teardrop" clipPathUnits="objectBoundingBox"><path d="M0.5 0 C0.52 0.05 1 0.38 1 0.62 A0.5 0.38 0 1 1 0 0.62 C0 0.38 0.48 0.05 0.5 0 Z"/></clipPath>' +
+  '<clipPath id="pptx-shape-pie" clipPathUnits="objectBoundingBox"><path d="M0.5 0.5 L0.5 0 A0.5 0.5 0 1 1 0 0.5 Z"/></clipPath>' +
+  '<clipPath id="pptx-shape-cloud" clipPathUnits="objectBoundingBox"><path d="M0.07 0.66 A0.15 0.15 0 0 1 0.22 0.51 A0.24 0.24 0 0 1 0.5 0.26 A0.25 0.25 0 0 1 0.92 0.5 A0.17 0.17 0 0 1 0.8 0.8 L0.14 0.8 A0.15 0.15 0 0 1 0.07 0.66 Z"/></clipPath>' +
+  '<clipPath id="pptx-shape-heart" clipPathUnits="objectBoundingBox"><path d="M0.5 0.96 C0.12 0.68 0.02 0.46 0.1 0.28 C0.18 0.1 0.4 0.12 0.5 0.32 C0.6 0.12 0.82 0.1 0.9 0.28 C0.98 0.46 0.88 0.68 0.5 0.96 Z"/></clipPath>' +
+  '</defs></svg>'
+
+/** 旋转元素 → CSS transform（度，顺时针；transform-origin 默认 50% 50% 与 pptxgenjs rotate 一致）。 */
+function rotateStyle(el: SceneElement): string {
+  const rotation = (el as { rotation?: number }).rotation
+  return rotation !== undefined && rotation !== 0 ? `transform:rotate(${rotation}deg);` : ''
 }
 
 function baseStyle(el: SceneElement): string {
@@ -309,7 +352,7 @@ function chartSvg(chart: ChartElement, theme: ResolvedTheme): string {
       : chart.chartType === 'line' || chart.chartType === 'area'
         ? lineAreaChartSvg(chart, theme)
         : pieChartSvg(chart, theme)
-  return `<svg class="el" style="${baseStyle(chart)}" viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg">${inner}</svg>`
+  return `<svg class="el" data-el="${esc(chart.id)}" style="${baseStyle(chart)}" viewBox="0 0 ${w} ${h}" xmlns="http://www.w3.org/2000/svg">${inner}</svg>`
 }
 
 // ---------------------------------------------------------------- 元素 → HTML
@@ -341,7 +384,22 @@ function textHtml(el: TextElement, theme: ResolvedTheme): string {
     })
     .join('')
   const fillStyle = el.fill !== undefined ? `background:${el.fill};` : ''
-  return `<div class="el" style="${baseStyle(el)}${fillStyle}color:${el.color};font-family:${fontStack(font)};font-size:${ptToPx(el.fontSize)}px;${el.bold ? 'font-weight:700;' : ''}${el.italic ? 'font-style:italic;' : ''}display:flex;flex-direction:column;justify-content:${justify};overflow:visible;">${paragraphs}</div>`
+  return `<div class="el" data-el="${esc(el.id)}" style="${baseStyle(el)}${fillStyle}color:${el.color};font-family:${fontStack(font)};font-size:${ptToPx(el.fontSize)}px;${el.bold ? 'font-weight:700;' : ''}${el.italic ? 'font-style:italic;' : ''}display:flex;flex-direction:column;justify-content:${justify};overflow:visible;">${paragraphs}</div>`
+}
+
+/** 形状轻阴影（0.15.0）→ CSS box-shadow。角度约定与 OOXML/pptxgenjs 一致：0=右、90=正下。 */
+function shadowStyle(el: ShapeElement): string {
+  if (el.shadow === undefined) return ''
+  const sh = el.shadow
+  const angle = ((sh.angle ?? 90) * Math.PI) / 180
+  const offset = ptToPx(sh.offset ?? 2)
+  const dx = Math.round(offset * Math.cos(angle) * 10) / 10
+  const dy = Math.round(offset * Math.sin(angle) * 10) / 10
+  const hex = sh.color ?? '#000000'
+  const r = parseInt(hex.slice(1, 3), 16)
+  const g = parseInt(hex.slice(3, 5), 16)
+  const b = parseInt(hex.slice(5, 7), 16)
+  return `box-shadow:${dx}px ${dy}px ${ptToPx(sh.blur ?? 7)}px rgba(${r},${g},${b},${sh.opacity ?? 0.16});`
 }
 
 function shapeHtml(el: ShapeElement, theme: ResolvedTheme): string {
@@ -359,7 +417,7 @@ function shapeHtml(el: ShapeElement, theme: ResolvedTheme): string {
         ? `border-top:${ptToPx(1.5)}px solid ${theme.colors.textMuted};height:0;`
         : ''
   const opacity = el.opacity !== undefined && el.opacity < 1 ? `opacity:${el.opacity};` : ''
-  return `<div class="el" style="${baseStyle(el)}${background}${borderRadius}${clip}${border}${opacity}"></div>`
+  return `<div class="el" data-el="${esc(el.id)}" style="${baseStyle(el)}${background}${borderRadius}${clip}${border}${shadowStyle(el)}${opacity}${rotateStyle(el)}"></div>`
 }
 
 function imageHtml(el: ImageElement, assetData: Map<string, { mime: string; base64: string }>): string {
@@ -369,13 +427,13 @@ function imageHtml(el: ImageElement, assetData: Map<string, { mime: string; base
   }
   // 内联矢量图（0.13.0）：落盘前已 sanitizeSvg + normalizeSvgRoot（根标签无固定宽高、带 viewBox），此处直接内联
   if (el.svg !== undefined) {
-    return `<div class="el" style="${baseStyle(el)}${radius}overflow:hidden;">${el.svg}</div>`
+    return `<div class="el" data-el="${esc(el.id)}" style="${baseStyle(el)}${radius}overflow:hidden;">${el.svg}</div>`
   }
   const asset = el.assetId !== undefined ? assetData.get(el.assetId) : undefined
   if (asset === undefined) {
     return `<div class="el ppt-placeholder" style="${baseStyle(el)}"><div class="ppt-ph-title">资产缺失：${esc(el.assetId ?? '?')}</div></div>`
   }
-  return `<img class="el" style="${baseStyle(el)}${radius}object-fit:${el.fit};" src="data:${asset.mime};base64,${asset.base64}" alt="${esc(el.name ?? el.id)}">`
+  return `<img class="el" data-el="${esc(el.id)}" style="${baseStyle(el)}${radius}object-fit:${el.fit};${rotateStyle(el)}" src="data:${asset.mime};base64,${asset.base64}" alt="${esc(el.name ?? el.id)}">`
 }
 
 function tableHtml(el: TableElement, theme: ResolvedTheme): string {
@@ -405,8 +463,23 @@ function pageBackgroundStyle(page: PageScene, theme: ResolvedTheme): string {
   if (page.background?.gradient !== undefined) {
     return `background:linear-gradient(${page.background.gradient.angle}deg, ${page.background.gradient.from}, ${page.background.gradient.to});`
   }
-  if (page.background?.color !== undefined) return `background:${page.background.color};`
+  // 0.19.0：结构页（带主色底的封面/章节/结尾）平涂升级为双色渐变——
+  // 与 PPTX 端光栅化 PNG 垫底同一令牌来源（structuralGradient），双端一致。
+  // 深色锚主题（tech-dark/navy-gold）带 structuralGradient 端点，其余回退 primary→secondary
+  if (page.background?.color !== undefined) {
+    const g = structuralGradient(theme)
+    return `background:linear-gradient(${g.angle}deg, ${g.from}, ${g.to});`
+  }
   return `background:${theme.colors.bg};`
+}
+
+/**
+ * 背景纹理层（0.18.0 T2-2）：内容页（无显式页面背景=铺主题底色的页）注入低透明度
+ * SVG 纹样，置于元素流首位（同级后者覆盖前者，天然垫底）。结构页有主色底+装饰，不注入。
+ */
+function textureLayer(theme: ResolvedTheme, page: PageScene): string {
+  if (theme.texture === undefined || page.background !== undefined) return ''
+  return `<div class="el" style="left:0;top:0;width:${inToPx(CANVAS_W_IN)}px;height:${inToPx(CANVAS_H_IN)}px;">${renderTextureSvg(theme.texture)}</div>`
 }
 
 function pageHtml(page: PageScene, index: number, theme: ResolvedTheme, assetData: Map<string, { mime: string; base64: string }>): string {
@@ -420,7 +493,7 @@ function pageHtml(page: PageScene, index: number, theme: ResolvedTheme, assetDat
     .map((el, i) => ({ el, key: el.z ?? i }))
     .sort((a, b) => a.key - b.key)
     .map(item => item.el)
-  const elements = ordered.map(el => elementHtml(el, theme, assetData)).join('\n')
+  const elements = textureLayer(theme, page) + ordered.map(el => elementHtml(el, theme, assetData)).join('\n')
   return `<section class="slide" data-page="${esc(page.id)}" data-title="${esc(page.title ?? page.type)}" data-notes="${notes}" style="${pageBackgroundStyle(page, theme)}">${elements}</section>`
 }
 
@@ -436,19 +509,12 @@ function progressBarHtml(progress: DeckProgress): string {
   return `<div id="genbar"><div id="genbar-track"><div id="genbar-fill" style="width:${percent}%"></div></div><span id="genbar-text">生成中 ${progress.written}/${progress.total} 页（${percent}%）${parts !== '' ? ' · ' + parts : ''}</span></div>`
 }
 
-function playerShell(deckTitle: string, slidesHtml: string, thumbItems: string, pageCount: number, progress?: DeckProgress): string {
-  return `<!DOCTYPE html>
-<html lang="zh">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>${esc(deckTitle)} · PPT 预览</title>
-<style>
-* { box-sizing: border-box; margin: 0; padding: 0; }
-html, body { width: 100%; height: 100%; overflow: hidden; background: #0d1117; }
-#app { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; }
-#stage { flex: 1; display: flex; align-items: center; justify-content: center; width: 100%; min-height: 0; }
-#deck { width: ${inToPx(CANVAS_W_IN)}px; height: ${inToPx(CANVAS_H_IN)}px; position: relative; transform-origin: center center; box-shadow: 0 12px 48px rgba(0,0,0,.55); border-radius: 4px; overflow: hidden; }
+/**
+ * 页面本体渲染 CSS（0.22.0 抽出）：播放器与视觉自审单页（renderPageAuditHtml）共用——
+ * 同一份规则保证 headless 截图与预览像素一致。
+ */
+const DECK_CSS = `* { box-sizing: border-box; margin: 0; padding: 0; }
+#deck { width: ${inToPx(CANVAS_W_IN)}px; height: ${inToPx(CANVAS_H_IN)}px; position: relative; overflow: hidden; }
 .slide { position: absolute; inset: 0; display: none; }
 .slide.active { display: block; }
 .svg-page { position: absolute; inset: 0; }
@@ -465,7 +531,24 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: #0d1117; }
 .ppt-table { border-collapse: collapse; table-layout: fixed; }
 .ppt-table th { background: var(--ppt-primary, #1E4B8F); color: #fff; font-weight: 700; padding: 6px 9px; text-align: left; }
 .ppt-table td { padding: 6px 9px; border-bottom: 1px solid rgba(107,114,128,.35); overflow: hidden; word-break: break-all; }
-.ppt-table.zebra tbody tr:nth-child(even) { background: rgba(148,163,184,.14); }
+.ppt-table.zebra tbody tr:nth-child(even) { background: rgba(148,163,184,.14); }`
+
+/** 播放器壳专属 CSS（自审单页不注入）：暗色外壳/缩放舞台/HUD/缩略图/备注/进度条/编辑层。 */
+const PLAYER_CHROME_CSS = `html, body { width: 100%; height: 100%; overflow: hidden; background: #0d1117; }
+#app { display: flex; flex-direction: column; align-items: center; justify-content: center; height: 100%; }
+#stage { flex: 1; display: flex; align-items: center; justify-content: center; width: 100%; min-height: 0; }
+#deck { transform-origin: center center; box-shadow: 0 12px 48px rgba(0,0,0,.55); border-radius: 4px; }`
+
+function playerShell(deckTitle: string, slidesHtml: string, thumbItems: string, pageCount: number, progress?: DeckProgress): string {
+  return `<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>${esc(deckTitle)} · PPT 预览</title>
+<style>
+${DECK_CSS}
+${PLAYER_CHROME_CSS}
 #hud { height: 52px; display: flex; align-items: center; gap: 14px; color: #cbd5e1; font: 14px/1 'Microsoft YaHei', sans-serif; user-select: none; }
 #hud button { background: #1f2937; color: #e2e8f0; border: 1px solid #374151; border-radius: 6px; padding: 6px 14px; font-size: 15px; cursor: pointer; }
 #hud button:hover { background: #374151; }
@@ -482,9 +565,16 @@ html, body { width: 100%; height: 100%; overflow: hidden; background: #0d1117; }
 #genbar-track { flex: 0 0 160px; height: 8px; border-radius: 4px; background: #1f2937; overflow: hidden; }
 #genbar-fill { height: 100%; background: linear-gradient(90deg, #38bdf8, #818cf8); transition: width .3s; }
 #genbar-text { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+/* 就地编辑层（0.21.0 P1）：E 或按钮开启——选中虚线框、拖动/方向键移动、双击改文字、保存回写 */
+#hud button.on { background: #2563eb; color: #fff; }
+body.editing #hint::after { content: ' · 编辑中：点选元素，拖动/方向键移动，双击文本改字，保存后需回会话 ppt_scene_check'; }
+.ppt-sel { outline: 2px dashed #2563eb !important; outline-offset: 2px; cursor: move !important; }
+.ppt-edit-ta { position: absolute; z-index: 60; background: rgba(255,255,255,.92); border: 2px solid #2563eb; border-radius: 4px; padding: 4px 6px; font: 14px/1.5 'Microsoft YaHei', sans-serif; color: #1f2937; resize: none; }
+#editsave { background: #059669; color: #fff; }
 </style>
 </head>
 <body>
+${SHAPE_CLIP_DEFS}
 ${progress !== undefined ? progressBarHtml(progress) : ''}
 <div id="app">
   <div id="stage"><div id="deck">
@@ -494,6 +584,8 @@ ${slidesHtml}
     <button id="prev" title="上一页 (←)">‹</button>
     <span id="counter">1 / ${pageCount}</span>
     <button id="next" title="下一页 (→)">›</button>
+    <button id="editbtn" title="就地编辑 (E)：拖动元素/双击改字，保存后回会话校验渲染">编辑</button>
+    <button id="editsave" style="display:none">保存 (0)</button>
     <span id="hint">←/→ 翻页 · F 全屏 · G 缩略图 · N 备注</span>
   </div>
 </div>
@@ -515,6 +607,7 @@ ${thumbItems}
     slides.forEach(function (s, i) { s.classList.toggle('active', i === current) })
     thumbs.forEach(function (t, i) { t.classList.toggle('current', i === current) })
     counter.textContent = (current + 1) + ' / ' + slides.length
+    window.__pptCur = current
     notes.textContent = slides[current].getAttribute('data-notes') || '（本页无备注）'
   }
   function fit() {
@@ -537,6 +630,147 @@ ${thumbItems}
   window.addEventListener('resize', fit)
   fit()
   show(0)
+  window.__pptScale = function () { var m = /scale\\(([\\d.]+)\\)/.exec(deck.style.transform); return m ? parseFloat(m[1]) : 1 }
+  window.__pptShow = show
+  window.__pptSlides = slides
+})()
+/* ---------------- 就地编辑层（0.21.0 P1） ---------------- */
+;(function () {
+  var deck = document.getElementById('deck')
+  var editBtn = document.getElementById('editbtn')
+  var saveBtn = document.getElementById('editsave')
+  var editMode = false
+  var pending = {}   // pageId -> { elId -> patch }
+  var selected = null
+  var drag = null
+  var ta = null
+  function slidesArr() { return window.__pptSlides || [] }
+  function curSlide() { return slidesArr()[window.__pptCur !== undefined ? window.__pptCur : 0] }
+  function countEdits() { var n = 0; Object.keys(pending).forEach(function (p) { n += Object.keys(pending[p]).length }); return n }
+  function refreshSave() {
+    var n = countEdits()
+    saveBtn.style.display = editMode && n > 0 ? '' : 'none'
+    saveBtn.textContent = '保存 (' + n + ')'
+  }
+  function record(pageId, elId, patch) {
+    var page = pending[pageId] || (pending[pageId] = {})
+    var edit = page[elId] || (page[elId] = {})
+    Object.keys(patch).forEach(function (k) { edit[k] = patch[k] })
+    refreshSave()
+  }
+  function setSel(el) {
+    if (selected) selected.classList.remove('ppt-sel')
+    selected = el
+    if (el) el.classList.add('ppt-sel')
+  }
+  function toIn(px) { return Math.round(px / 96 * 100) / 100 }
+  function activeSlideEl(el) {
+    var slide = el.closest('.slide')
+    return slide !== null && slide.classList.contains('active') ? slide : null
+  }
+  deck.addEventListener('click', function (e) {
+    if (!editMode) return
+    if (ta !== null) return
+    var el = e.target.closest('.el')
+    if (el !== null && activeSlideEl(el) !== null && el.getAttribute('data-el')) { setSel(el); e.stopPropagation() }
+    else setSel(null)
+  }, true)
+  deck.addEventListener('pointerdown', function (e) {
+    if (!editMode || selected === null || ta !== null) return
+    if (e.target.closest('.el') !== selected) return
+    drag = { x: e.clientX, y: e.clientY, left: selected.offsetLeft, top: selected.offsetTop, moved: false }
+    try { selected.setPointerCapture(e.pointerId) } catch (err) { /* 老浏览器忽略 */ }
+    e.preventDefault()
+  })
+  deck.addEventListener('pointermove', function (e) {
+    if (drag === null) return
+    var sc = window.__pptScale()
+    drag.moved = true
+    selected.style.left = (drag.left + (e.clientX - drag.x) / sc) + 'px'
+    selected.style.top = (drag.top + (e.clientY - drag.y) / sc) + 'px'
+  })
+  deck.addEventListener('pointerup', function () {
+    if (drag === null) return
+    if (drag.moved) record(selected.closest('.slide').getAttribute('data-page'), selected.getAttribute('data-el'), { x: toIn(selected.offsetLeft), y: toIn(selected.offsetTop) })
+    drag = null
+  })
+  deck.addEventListener('dblclick', function (e) {
+    if (!editMode || ta !== null) return
+    var el = e.target.closest('.el')
+    if (el === null || el.getAttribute('data-el') === null || activeSlideEl(el) === null) return
+    setSel(el)
+    ta = document.createElement('textarea')
+    ta.className = 'ppt-edit-ta'
+    ta.style.left = el.offsetLeft + 'px'
+    ta.style.top = el.offsetTop + 'px'
+    ta.style.width = Math.max(el.offsetWidth, 120) + 'px'
+    ta.style.height = Math.max(el.offsetHeight, 32) + 'px'
+    ta.value = el.innerText.replace(/\\s+$/, '')
+    el.closest('.slide').appendChild(ta)
+    ta.focus()
+    ta.select()
+    function commit() {
+      var texts = ta.value.split('\\n')
+      el.textContent = ta.value
+      record(el.closest('.slide').getAttribute('data-page'), el.getAttribute('data-el'), { texts: texts })
+      ta.remove()
+      ta = null
+    }
+    ta.addEventListener('blur', commit)
+    ta.addEventListener('keydown', function (e) {
+      if (e.key === 'Escape') { ta.removeEventListener('blur', commit); ta.remove(); ta = null }
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) commit()
+      e.stopPropagation()
+    })
+  })
+  document.addEventListener('keydown', function (e) {
+    if ((e.key === 'e' || e.key === 'E') && !e.ctrlKey && !e.metaKey && ta === null && !e.target.closest('textarea,input')) { toggleEdit(); e.preventDefault(); return }
+    if (!editMode || selected === null) return
+    var step = e.shiftKey ? 0.1 : 0.02
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowRight' || e.key === 'ArrowUp' || e.key === 'ArrowDown') {
+      var dx = e.key === 'ArrowLeft' ? -step : e.key === 'ArrowRight' ? step : 0
+      var dy = e.key === 'ArrowUp' ? -step : e.key === 'ArrowDown' ? step : 0
+      selected.style.left = (selected.offsetLeft + dx * 96) + 'px'
+      selected.style.top = (selected.offsetTop + dy * 96) + 'px'
+      record(selected.closest('.slide').getAttribute('data-page'), selected.getAttribute('data-el'), { x: toIn(selected.offsetLeft), y: toIn(selected.offsetTop) })
+      e.preventDefault(); e.stopPropagation()
+    } else if (e.key === 'Escape') { setSel(null) }
+  }, true)
+  function toggleEdit() {
+    editMode = !editMode
+    document.body.classList.toggle('editing', editMode)
+    editBtn.classList.toggle('on', editMode)
+    if (!editMode) setSel(null)
+    refreshSave()
+  }
+  editBtn.onclick = toggleEdit
+  saveBtn.onclick = function () {
+    if (countEdits() === 0) return
+    var m = /\\/ppt-studio\\/([^/]+)\\/preview/.exec(location.pathname)
+    if (m === null) { alert('就地编辑需要经预览服务打开本页（http://…:3170/ppt-studio/<deckId>/preview/）；直接双击打开的文件没有回写通道。'); return }
+    var url = '/ppt-studio/' + m[1] + '/edit'
+    var jobs = Object.keys(pending).map(function (pageId) {
+      var edits = Object.keys(pending[pageId]).map(function (elId) {
+        var patch = { id: elId }
+        Object.keys(pending[pageId][elId]).forEach(function (k) { patch[k] = pending[pageId][elId][k] })
+        return patch
+      })
+      return fetch(url, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ pageId: pageId, edits: edits }) })
+        .then(function (r) { return r.json().then(function (j) { return { ok: r.ok, j: j } }) })
+        .then(function (out) {
+          if (!out.ok) throw new Error(out.j && out.j.error ? out.j.error : '保存失败')
+          return out.j
+        })
+    })
+    Promise.all(jobs).then(function (results) {
+      var warnings = []
+      results.forEach(function (r) { (r.warnings || []).forEach(function (w) { warnings.push(w) }) })
+      pending = {}
+      refreshSave()
+      alert('已保存 ' + results.length + ' 页修改，预览已刷新。' + (warnings.length > 0 ? '\\n校验提醒：' + warnings.slice(0, 3).join('；') : '') + '\\n注意：改动已落盘但 sceneHash 已过期——回会话调 ppt_scene_check + ppt_deck_render 出正式 PPTX。')
+      location.reload()
+    }).catch(function (err) { alert('保存被拒绝：' + err.message + '\\n（改动未落盘，可调整后重试）') })
+  }
 })()
 </script>
 </body>
@@ -575,4 +809,38 @@ export async function renderDeckHtml(input: RenderHtmlInput): Promise<RenderHtml
   await writeFile(tmp, html, 'utf8')
   await rename(tmp, htmlPath)
   return { htmlPath, bytes: Buffer.byteLength(html, 'utf8') }
+}
+
+// ---------------------------------------------------------------- 视觉自审单页（0.22.0 T3-4）
+
+export interface PageAuditHtmlInput {
+  page: PageScene
+  theme: ResolvedTheme
+  /** 与 renderDeckHtml 同路预加载的图片资产（缺省空——无图页可直接省） */
+  assetData?: Map<string, { mime: string; base64: string }>
+}
+
+/**
+ * 视觉自审单页 HTML：与播放器共用 DECK_CSS 的独立页面——无播放器壳/缩放 JS/进度条，
+ * deck 钉在 (0,0) 整尺寸（1280×720 CSS px），headless 浏览器按该窗口截图即 1:1 页面像素。
+ */
+export function renderPageAuditHtml(input: PageAuditHtmlInput): string {
+  const slide = pageHtml(input.page, 0, input.theme, input.assetData ?? new Map<string, { mime: string; base64: string }>())
+  return `<!DOCTYPE html>
+<html lang="zh">
+<head>
+<meta charset="utf-8">
+<style>
+${DECK_CSS}
+html, body { width: ${inToPx(CANVAS_W_IN)}px; height: ${inToPx(CANVAS_H_IN)}px; overflow: hidden; }
+.slide { display: block; }
+</style>
+</head>
+<body>
+${SHAPE_CLIP_DEFS}
+<div id="deck">
+${slide}
+</div>
+</body>
+</html>`
 }

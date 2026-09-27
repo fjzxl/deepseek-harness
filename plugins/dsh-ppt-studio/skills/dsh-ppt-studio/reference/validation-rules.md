@@ -57,6 +57,9 @@
 | CHART_LEGEND_REDUNDANT | info | 单系列图例只重复系列名，冗余不碍事——提示性建议，标题点名更省版面（饼/环图例承载类别名，不适用） |
 | TOKEN_COLOR | warning | 越出锁定色板破坏品牌一致性，但页面本身能渲染（strict 下升 error） |
 | TOKEN_FONT | warning | 同上——字体越锁是品牌问题不是渲染失败（strict 下升 error） |
+| OUTLINE_PAGE_MISMATCH | error | 写页槽位与大纲页型不一致 = 写错页（真实事故：全册错位两格、目录被写到 p028）——大纲是确认过的页契约（0.16.0） |
+| EMPTY_CONTAINER | error | roundRect 卡片内无任何内容是截断重写的特征（画了框忘了字必然废页）；小徽章豁免、纯装饰用 rect/ellipse（0.16.0） |
+| DECORATION_CONTRAST | warning | 装饰与背景亮度对比 <2.0 且色距 <75 = 肉眼不可见——"有装饰等于没有"是观感问题不是渲染失败；豁免低透明度水印/带描边/渐变填充（0.15.0） |
 | DENSITY_WITH_VISUAL | warning | 有图页文字超预算是"观感与认知负荷"问题；页级 density 系数与 densityOverride 可知情放宽 |
 | BULLET_BUDGET_EXCEEDED | warning | 要点超限是认知负荷上限；densityOverride 可知情豁免 |
 | EVIDENCE_SOURCE_MISSING | warning | 数字论断缺来源是可信度问题不是渲染问题；提供材料清单或 strict 时升 error。清单下优先 materialId 精确匹配（id 命中才算引用，标题子串仅兼容兜底） |
@@ -73,6 +76,7 @@
 | PAGE_MISSING | error | 大纲页未写入——deck 不完整，渲染即缺页 |
 | PAGE_ORPHAN | warning | 页面不在大纲中只是不参与渲染，可能是手动实验残留 |
 | LAYOUT_MONOTONY | warning | 连续 3 页同页型是观感问题 |
+| VISUAL_RATIO_LOW | warning | 图文配比低于 brief.visualStyle 目标（visual ≥1/3 / balanced ≥1/5）是"全册没图"的配比级信号，可改页型/补蓝图重写（0.16.0） |
 | TYPE_DIVERSITY | warning | 页型单一同上 |
 | VISUAL_RHYTHM | warning | 连续 4 页无图是节奏问题 |
 | NARRATIVE_CHAIN_MISSING | warning(info) | strictness=strict 时叙事链必填（缺承接=断链风险，warning）；其余档链已建立时缺口只提示 info。0.9.1 起分级只认 strictness——mode 只决定确认点 |

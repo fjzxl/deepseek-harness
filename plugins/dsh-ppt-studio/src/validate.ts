@@ -14,7 +14,7 @@
  * 「可信」由 EVIDENCE_SOURCE_MISSING 保障（数字论断需来源，内网来源=用户材料）；
  * 「连贯/结论感」由 NARRATIVE_CHAIN_MISSING / TITLE_TAKEAWAY 保障（叙事链与结论式标题）。
  */
-import type { AssetManifest, DesignTokens, EvidenceItem, EvidenceLevel, InfoStructure, OutlinePage, OutlinePart, PageDensity, PageScene, ReferenceMaterial, SceneElement, Strictness, TextElement, ValidationIssue, PageValidationResult, VisualPlan } from './schema.js'
+import type { AssetManifest, DesignTokens, EvidenceItem, EvidenceLevel, InfoStructure, OutlinePage, OutlinePart, PageDensity, PageScene, PageType, ReferenceMaterial, SceneElement, Strictness, TextElement, ValidationIssue, PageValidationResult, VisualPlan, VisualStyle } from './schema.js'
 import { CANVAS_H_IN, CANVAS_W_IN, SAFE_MARGIN_IN } from './units.js'
 
 const TOL = 0.02
@@ -66,6 +66,8 @@ export interface PageValidateOptions {
   tokens?: DesignTokens
   /** 大纲中该页的配图计划：image/chart 时校验页面确有对应元素 */
   visualPlan?: VisualPlan
+  /** 大纲中该页声明的页型（0.16.0）：与落盘页 type 不一致 → OUTLINE_PAGE_MISMATCH error */
+  outlineType?: PageType
   /** Blueprint 声明的信息结构：与页型错配时提醒 */
   structure?: InfoStructure
   /** 有主视觉页的全页文字预算（全角字符单位） */
@@ -135,6 +137,47 @@ function intersection(a: Box, b: Box): { w: number; h: number; area: number } | 
   const h = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y)
   if (w <= TOL || h <= TOL) return null
   return { w, h, area: w * h }
+}
+
+/** WCAG 相对亮度（0-1）。装饰有效性判定用（0.15.0，与 themes.buildTintScale 同源算法）。 */
+function relativeLuminance(hex: string): number {
+  const c = [1, 3, 5].map(i => parseInt(hex.slice(i, i + 2), 16) / 255)
+  const lin = (v: number): number => (v <= 0.03928 ? v / 12.92 : Math.pow((v + 0.055) / 1.055, 2.4))
+  return 0.2126 * lin(c[0]) + 0.7152 * lin(c[1]) + 0.0722 * lin(c[2])
+}
+
+/** RGB 欧氏距离（0-441）：亮度接近但色相差异大的组合（如青底绿装饰）靠它避免误报。 */
+function rgbDistance(a: string, b: string): number {
+  const dr = parseInt(a.slice(1, 3), 16) - parseInt(b.slice(1, 3), 16)
+  const dg = parseInt(a.slice(3, 5), 16) - parseInt(b.slice(3, 5), 16)
+  const db = parseInt(a.slice(5, 7), 16) - parseInt(b.slice(5, 7), 16)
+  return Math.sqrt(dr * dr + dg * dg + db * db)
+}
+
+/**
+ * 装饰与背景的「双盲区」判定：亮度对比度与色差都接近零才算肉眼不可见（任一指标达标即视为可见）。
+ * 对比度用 WCAG 比值（≥2.0 达标）；色差用 RGB 欧氏距离（≥75 达标，弥补亮度对色相盲区——
+ * 如青底上的绿色装饰亮度接近但色差大）。渐变背景取两端点+中点为候选：**任一候选处不可见即报**
+ * （装饰通常横跨渐变区域，只在一端可见=另一端等于没有）。
+ * 真实案例：暗红 #7A1E22 圆叠大红 #B02A30→#D4544F 渐变底（对 from 端比值 1.59、色距 57）。
+ */
+function isVisuallyIndistinguishable(fill: string, bgCandidates: string[]): boolean {
+  const fillLum = relativeLuminance(fill)
+  for (const bg of bgCandidates) {
+    const bgLum = relativeLuminance(bg)
+    const ratio = (Math.max(fillLum, bgLum) + 0.05) / (Math.min(fillLum, bgLum) + 0.05)
+    if (ratio < 2.0 && rgbDistance(bg, fill) < 75) return true
+  }
+  return false
+}
+
+/** 令牌允许的完整色集（8 基色 + 图表色 + 色阶，0.15.0 起含 tints）。 */
+function tokenColorSet(tokens: DesignTokens): Set<string> {
+  const allowed = new Set<string>([...Object.values(tokens.colors), ...tokens.chartColors])
+  if (tokens.tints !== undefined) {
+    for (const scale of Object.values(tokens.tints)) for (const hex of Object.values(scale)) allowed.add(hex)
+  }
+  return allowed
 }
 
 function isText(el: SceneElement): el is TextElement {
@@ -267,7 +310,7 @@ export function validateSvgPage(page: PageScene, options: PageValidateOptions = 
   }
   // ---- 锁定色板（best-effort：只识别 6 位 hex；3 位缩写与命名色不查——文档已注明）
   if (options.tokens !== undefined) {
-    const allowed = new Set<string>([...Object.values(options.tokens.colors), ...options.tokens.chartColors].map(c => c.toLowerCase()))
+    const allowed = new Set([...tokenColorSet(options.tokens)].map(c => c.toLowerCase()))
     const used = [...new Set((svg.match(/#[0-9a-fA-F]{6}\b/g) ?? []).map(c => c.toLowerCase()))]
     const offending = used.filter(c => !allowed.has(c))
     if (offending.length > 0) {
@@ -339,6 +382,19 @@ export function validatePage(page: PageScene, options: PageValidateOptions = {})
   const elements = page.elements
   const { manifest, tokens } = options
   const issues: ValidationIssue[] = []
+
+  // ---- 写页槽位与大纲一致（0.16.0）：真实事故 d20260922-220212——内容页从 p002 起写（跳过目录槽位），
+  // 全册错位两格，目录最终被写到 p028、封面重复两次。大纲是确认过的页契约，槽位类型不同 = 写错页。
+  if (options.outlineType !== undefined && page.type !== options.outlineType) {
+    issues.push({
+      level: 'error',
+      rule: 'OUTLINE_PAGE_MISMATCH',
+      message: `页 ${page.id} 在大纲中的页型是 ${options.outlineType}，但本次写入的是 ${page.type}——写错槽位（整册会错位，结构页尤其致命）。内容按大纲页序对应到页 ID，不要按"写完的页数"自行编号`,
+      pageId: page.id,
+      fixable: true,
+      suggestedFix: `改写到正确槽位：本页内容若是 ${page.type}，应写到蓝图中类型为 ${page.type} 的页 ID；${page.id} 应写 ${options.outlineType} 内容（按蓝图 title 对照）`,
+    })
+  }
 
   // ---- ID 唯一性
   const seen = new Set<string>()
@@ -524,9 +580,68 @@ export function validatePage(page: PageScene, options: PageValidateOptions = {})
     }
   }
 
-  // ---- 锁定令牌：颜色 / 字体（design/tokens.json 之外的一律提醒）
+  // ---- 空容器（0.16.0）：卡片画了框但里面没有任何文字/图/图表——写页截断的特征信号。
+  // 真实事故 d20260922-220212 p011/p012：强模型长输出被截断，重试后产出"有框无字"的页面且通过全部旧规则。
+  // 判定：roundRect 面积 ≥1.5in²（卡片尺寸量级；小圆片/徽章豁免），且无任何内容元素
+  // （text/image/chart/table）的主体（≥60% 面积）落在卡片内。纯装饰请用 rect/ellipse。
+  {
+    const cards = elements.filter(el =>
+      el.kind === 'shape' && el.shape === 'roundRect' && el.w * el.h >= 1.5)
+    if (cards.length > 0) {
+      const contents = elements.filter(el => el.kind !== 'shape')
+      for (const card of cards) {
+        const hasContent = contents.some(content => {
+          const inter = intersection(card, content)
+          return inter !== null && inter.area >= 0.6 * content.w * content.h
+        })
+        if (!hasContent) {
+          issues.push({
+            level: 'error',
+            rule: 'EMPTY_CONTAINER',
+            message: `卡片 ${elementLabel(card)}（${card.w}×${card.h}in）内部没有任何文字/图片/图表——疑似写页被截断（画了框忘了内容）；若确是纯装饰请改用 rect/ellipse`,
+            pageId: page.id,
+            elementId: card.id,
+            fixable: true,
+            suggestedFix: '给卡片补内容元素（文字放 paragraphs、配图给 image.svg 或 assetId），或删掉这个空框',
+          })
+        }
+      }
+    }
+  }
+
+  // ---- 装饰有效性（0.15.0）：装饰形状与页面背景亮度/色差双盲区 → 肉眼不可见
+  // 豁免：低透明度（<0.6，水印式底纹是有意的弱化）、带描边（轮廓可见）、渐变填充（多端点无法单一判定）。
+  // 渐变背景取两端点 + 中点做候选：三处都不可见才报（保守，避免误报只贴一端的装饰）。
+  {
+    const bgCandidates: string[] = []
+    if (page.background?.color !== undefined) bgCandidates.push(page.background.color)
+    else if (page.background?.gradient !== undefined) {
+      const g = page.background.gradient
+      bgCandidates.push(g.from, g.to, `#${[1, 3, 5].map(i => Math.round((parseInt(g.from.slice(i, i + 2), 16) + parseInt(g.to.slice(i, i + 2), 16)) / 2).toString(16).padStart(2, '0').toUpperCase()).join('')}`)
+    }
+    else if (tokens !== undefined) bgCandidates.push(tokens.colors.bg)
+    if (bgCandidates.length > 0) {
+      for (const el of elements) {
+        if (el.kind !== 'shape' || el.background !== true) continue
+        if (typeof el.fill !== 'string' || el.border !== undefined) continue
+        if ((el.opacity ?? 1) < 0.6) continue
+        if (!isVisuallyIndistinguishable(el.fill, bgCandidates)) continue
+        issues.push({
+          level: 'warning',
+          rule: 'DECORATION_CONTRAST',
+          message: `装饰形状 ${elementLabel(el)}（填充 ${el.fill}）与页面背景亮度/色差均接近零，肉眼几乎不可见——「有装饰但等于没有」`,
+          pageId: page.id,
+          elementId: el.id,
+          fixable: true,
+          suggestedFix: '改用锁定色板中对比更强的颜色（结构页装饰可用色阶 tint），或删除该装饰',
+        })
+      }
+    }
+  }
+
+  // ---- 锁定令牌：颜色 / 字体（design/tokens.json 之外的一律提醒；色阶 tints 同属锁定色，0.15.0）
   if (tokens !== undefined) {
-    const allowed = new Set<string>([...Object.values(tokens.colors), ...tokens.chartColors])
+    const allowed = tokenColorSet(tokens)
     const bgColors: string[] = []
     if (page.background?.color !== undefined) bgColors.push(page.background.color)
     if (page.background?.gradient !== undefined) bgColors.push(page.background.gradient.from, page.background.gradient.to)
@@ -584,11 +699,27 @@ export function validatePage(page: PageScene, options: PageValidateOptions = {})
       })
     }
   }
+  // 0.17.1 升 error：蓝图承诺配图但页面没有 image 元素 = 计划与实现不一致的契约违约
+  // （真实事故：全册只有 1 个占位图，warning 被无视）。结构页的 visual 已在 section_draft 归一为 none，不会误伤。
   if (options.visualPlan === 'image' && !elements.some(el => el.kind === 'image')) {
-    issues.push({ level: 'warning', rule: 'VISUAL_PLAN_UNMET', message: '草稿计划配图（visual:image），但页面没有 image 元素（实图或 placeholder）', pageId: page.id })
+    issues.push({
+      level: 'error',
+      rule: 'VISUAL_PLAN_UNMET',
+      message: '蓝图计划配图（visual:image），但页面没有 image 元素（实图/SVG 图示/占位框任一都行）——要么补上，要么重调 ppt_section_draft 把该页 visual 改 none',
+      pageId: page.id,
+      fixable: true,
+      suggestedFix: 'content 模式给 image:{illustration:{…}} 或 svg/assetId/prompt；或改蓝图 visual',
+    })
   }
   if (options.visualPlan === 'chart' && !elements.some(el => el.kind === 'chart')) {
-    issues.push({ level: 'warning', rule: 'VISUAL_PLAN_UNMET', message: '草稿计划配图表（visual:chart），但页面没有 chart 元素', pageId: page.id })
+    issues.push({
+      level: 'error',
+      rule: 'VISUAL_PLAN_UNMET',
+      message: '蓝图计划配图表（visual:chart），但页面没有 chart 元素——要么补图表数据，要么重调 ppt_section_draft 把该页 visual 改 none',
+      pageId: page.id,
+      fixable: true,
+      suggestedFix: 'content 模式给 chart:{chartType,labels,series}；或改蓝图 visual',
+    })
   }
 
   // ---- Blueprint 信息结构与页型的匹配（错配提醒，不阻断）
@@ -693,6 +824,8 @@ export interface DeckValidateOptions extends PageValidateOptions {
   outlinePages?: OutlinePage[]
   /** 叙事架构的部分清单：启用 TITLE_TAKEAWAY（页标题与章节标题雷同检测） */
   parts?: OutlinePart[]
+  /** 视觉风格（0.16.0）：visual=图文优先（配比 ≥1/3 硬提醒）；balanced=均衡（≥1/5）；text=文字优先（节奏规则降 info） */
+  visualStyle?: VisualStyle
 }
 
 /** 全册校验：页面集合 + 大纲一致性 + 配图计划/信息结构落实 + 跨页集成检查。 */
@@ -704,6 +837,7 @@ export function validateDeckPages(pages: PageScene[], options: DeckValidateOptio
       manifest: options.manifest,
       tokens: options.tokens,
       visualPlan: outlinePage?.visual,
+      outlineType: outlinePage?.type,
       structure: outlinePage?.structure,
       withVisualCharBudget: options.withVisualCharBudget,
       bulletsMax: options.bulletsMax,
@@ -757,6 +891,29 @@ export function validateDeckPages(pages: PageScene[], options: DeckValidateOptio
     }
   }
 
+  // ---- 图文配比（0.16.0，brief.visualStyle）：真实反馈 d20260922-220212——29 页零图。
+  // visual 档配比 <1/3、balanced 档 <1/5 时 warning（把"该有图"从节奏提醒升级为配比指标）；
+  // text 档不查配比，且 VISUAL_RHYTHM 降 info（纯文字讲义是合法选择）。
+  const visualStyle = options.visualStyle ?? 'balanced'
+  if (visualStyle !== 'text' && contentPages.length >= 6) {
+    const visualPages = contentPages.filter(p =>
+      p.svg !== undefined || (p.elements?.some(el => (el.kind === 'image' || el.kind === 'chart') && el.background !== true) ?? false)).length
+    const ratio = visualPages / contentPages.length
+    const floor = visualStyle === 'visual' ? 1 / 3 : 1 / 5
+    if (ratio < floor) {
+      issues.push({
+        level: 'warning',
+        rule: 'VISUAL_RATIO_LOW',
+        message: `图文配比不足：${contentPages.length} 个内容页中只有 ${visualPages} 页有图/图表（${Math.round(ratio * 100)}% < 目标 ${Math.round(floor * 100)}%，brief.visualStyle=${visualStyle}）——在蓝图给更多页 visual:image（image-text 页给 image.svg 矢量插图）或 visual:chart`,
+        fixable: true,
+        suggestedFix: '挑选适合图示化的页改成 image-text/chart 页型（蓝图同步 visual 字段），重写这些页',
+      })
+    }
+  }
+  const graded0 = visualStyle === 'text'
+    ? issues.map(i => (i.rule === 'VISUAL_RHYTHM' && i.level === 'warning' ? { ...i, level: 'info' as const } : i))
+    : issues
+
   // ---- 叙事链：PPT 是连续叙事，每页应说明如何承接上一页。
   // 分级（0.9.1 完成 mode 解耦：质量旋钮只认 strictness，mode 只决定确认点）：
   //   strictness=strict → 缺失升 warning（越严越要求叙事完整）；
@@ -803,7 +960,7 @@ export function validateDeckPages(pages: PageScene[], options: DeckValidateOptio
     }
   }
 
-  const graded = applyStrictness(issues, options.strictness)
+  const graded = applyStrictness(graded0, options.strictness)
   const errorCount = graded.filter(i => i.level === 'error').length
   const warningCount = graded.filter(i => i.level === 'warning').length
   return { ok: errorCount === 0, errorCount, warningCount, pageResults, issues: graded }

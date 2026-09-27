@@ -10,6 +10,7 @@ import { z } from 'zod'
 import type { ValidationIssue } from '../schema.js'
 import { countTextUnits, pageTextUnits, validateDeckPages } from '../validate.js'
 import { computePageHash, computeSceneHash, requireDeckState } from '../deck-store.js'
+import { auditDeckPages } from '../visual-audit.js'
 import { createDeckLogger } from '../logger.js'
 import type { ResolvedPptStudioConfig } from '../config.js'
 import { asRecord, oneText, resolveToolContext, type ToolDefinition } from './registry.js'
@@ -48,10 +49,11 @@ export function createCheckTools(config: ResolvedPptStudioConfig): ToolDefinitio
         '跨页集成检查（版式单调/页型多样性/视觉节奏/叙事链完整/标题即结论），并产出 sceneHash 校验指纹——ppt_deck_render 只渲染最新指纹对应的场景。' +
         '依赖感知：与上次校验比对页级指纹，返回 revalidated（本次变更/新增的页）与 unchangedCount——修改循环中只有变更页需要细看。' +
         '另返回 storyline 叙事链摘要（逐页标题/keyMessage/承接语，供自审连贯性）、duration 时长估算（vs 简报时长）与 outlineChanged（大纲关系型变更信号：改过 transition/页序后提示重读全量叙事链）。' +
+        '可选 visualAudit:true —— 对本次变更页（revalidated）做 headless 截图像素自审（左右失衡/垂直重心/近乎空白，warning 级提醒、不计入 issues 闸门、截图落 preview/audit/）；调版式后的修改循环建议开启。' +
         '中文：全册场景校验，返回校验指纹、变更页清单、叙事链摘要与时长估算。',
       parameters: {
         type: 'object',
-        properties: { deckId: { type: 'string' } },
+        properties: { deckId: { type: 'string' }, visualAudit: { type: 'boolean', description: '对变更页做 headless 截图像素自审（每页约 2 秒；warning 级提醒）' } },
         required: ['deckId'],
       },
       output: {
@@ -84,6 +86,22 @@ export function createCheckTools(config: ResolvedPptStudioConfig): ToolDefinitio
           if (gaps.length > 0) {
             lines.push(`⚠️ 疑似叙事断裂（缺承接语）：${gaps.join('、')}——叙事要求高的场景（strictness=strict）应把这几处衔接提交用户确认，不 OK 就补 transition 或改写承接。`)
           }
+          const audit = asRecord(v.visualAudit)
+          if (audit !== undefined) {
+            const auditIssues = Array.isArray(audit.issues) ? audit.issues.map(asRecord) : []
+            const audited = Array.isArray(audit.pagesAudited) ? audit.pagesAudited.length : 0
+            const auditNote = typeof audit.note === 'string' ? audit.note : undefined
+            if (auditIssues.length > 0) {
+              lines.push(`像素自审（headless 截图 ${audited} 页，warning 级提醒、不影响本次校验结论）：`)
+              for (const issue of auditIssues.slice(0, 10)) {
+                lines.push(`  [${String(issue.pageId)}] ${String(issue.message)}（截图 preview/audit/${String(issue.pageId)}.png）`)
+              }
+            } else if (auditNote !== undefined) {
+              lines.push(`像素自审跳过：${auditNote}`)
+            } else {
+              lines.push(`像素自审：${audited} 页截图分析通过（无失衡/空白提醒）。`)
+            }
+          }
           const storyline = Array.isArray(v.storyline) ? v.storyline : []
           if (storyline.length > 0) {
             lines.push('')
@@ -99,7 +117,7 @@ export function createCheckTools(config: ResolvedPptStudioConfig): ToolDefinitio
       },
       execute: async (rawArgs, exec) => {
         exec?.signal?.throwIfAborted()
-        const args = z.object({ deckId: z.string().min(1) }).parse(asRecord(rawArgs))
+        const args = z.object({ deckId: z.string().min(1), visualAudit: z.boolean().optional() }).parse(asRecord(rawArgs))
         const { store } = resolveToolContext(config, exec)
         const state = await requireDeckState(store, args.deckId)
         const outline = await store.loadOutline(args.deckId)
@@ -129,6 +147,7 @@ export function createCheckTools(config: ResolvedPptStudioConfig): ToolDefinitio
           tokens,
           outlinePages: outline.pages,
           parts: outline.parts,
+          visualStyle: brief?.visualStyle,
           evidenceLevel: brief?.evidenceLevel,
           strictness: brief?.strictness,
           referenceMaterials: brief?.referenceMaterials,
@@ -197,8 +216,30 @@ export function createCheckTools(config: ResolvedPptStudioConfig): ToolDefinitio
 
         const errorCount = issues.filter(i => i.level === 'error').length
         const warningCount = issues.filter(i => i.level === 'warning').length
+
+        // 像素自审（0.22.0 T3-4，visualAudit:true 可选）：只审本次变更页（revalidated），
+        // warning 级提醒独立于 issues 闸门（不影响 ok/errorCount 与渲染指纹语义）
+        let visualAudit: Awaited<ReturnType<typeof auditDeckPages>> | undefined
+        if (args.visualAudit === true) {
+          const targets = deckPages.filter(p => revalidated.includes(p.id))
+          visualAudit = await auditDeckPages({
+            store, deckId: args.deckId,
+            theme: {
+              colors: tokens.colors,
+              chartColors: tokens.chartColors,
+              fonts: tokens.fonts,
+              ...(tokens.texture !== undefined ? { texture: tokens.texture } : {}),
+              ...(tokens.structuralGradient !== undefined ? { structuralGradient: tokens.structuralGradient } : {}),
+            },
+            pages: targets,
+          })
+        }
+
         const logger = createDeckLogger(store.paths(args.deckId).root, args.deckId)
         logger.info('check', '全册校验完成', { sceneHash, errorCount, warningCount, pageCount: deckPages.length, revalidated })
+        if (visualAudit !== undefined) {
+          logger.info('check', '像素自审完成', { audited: visualAudit.pagesAudited, issues: visualAudit.issues.length, ...(visualAudit.note !== undefined ? { note: visualAudit.note } : {}) })
+        }
         return {
           deckId: args.deckId,
           ok: errorCount === 0,
@@ -213,6 +254,17 @@ export function createCheckTools(config: ResolvedPptStudioConfig): ToolDefinitio
           storylineGaps,
           outlineChanged,
           ...(duration !== undefined ? { duration } : {}),
+          ...(visualAudit !== undefined
+            ? {
+              visualAudit: {
+                browser: visualAudit.browser,
+                pagesAudited: visualAudit.pagesAudited,
+                skippedPages: visualAudit.skippedPages,
+                issues: visualAudit.issues,
+                ...(visualAudit.note !== undefined ? { note: visualAudit.note } : {}),
+              },
+            }
+            : {}),
         }
       },
     },

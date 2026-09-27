@@ -17,7 +17,7 @@ DSH（DeepSeek Harness）PPT 工作室插件：**简报（听众/场景/目标/�
 - **样例质量关卡**：先做第一部分蓝图给用户校准，确认后批量生成其余部分
 - **即时预览与进度**：`ppt_preview_update` 毫秒级刷新已写页面的 HTML 预览（**默认每阶段各弹一次**：即时预览首开 + 渲染完成再开，生成期间不反复弹窗），播放器顶部**进度条**显示 N/M 与各部分进度；用户喊停 `ppt_deck_pause` 暂停/恢复生成
 - **批量修改与试错分支**：`ppt_deck_find_replace` 全册查找替换（dryRun/scope/正则）；`ppt_deck_branch` 快照当前进度开分支，试另一叙事方向互不影响
-- **预览多根托管**：deck 按会话工作目录生成，预览服务自动合并启动目录与全局工作区注册表——任何会话的 deck 都能预览
+- **预览多根托管（0.22.0 懒注册）**：deck 按会话工作目录生成，预览服务自动合并启动目录与全局工作区注册表——任何会话的 deck 都能预览；运行期间新登记的工作区即时生效（deck 请求未命中时重查注册表，免重启）
 - **写页语义显式化**：ppt_page_write 默认整页替换，**遗漏既有元素直接拒绝保存**（报错列出丢失元素；`allowDrop:true` 确认删除、`append:true` 增量修改——0.7.1 起从警告升级，堵住两起真实数据丢失事故）
 - **修改循环状态一致性（0.8.0）**：页 ID 重排自动迁移已写页文件/校验指纹（增删页不再错位）；架构修订 `revise:true` 原地改故事（无需重建 deck）；`append`+`remove` 合并语义；`contentOutdated`/`renderOutdated` 过期标记（status 直接提示）；`strictness` 校验强度三态（strict 越锁即错 / relaxed 不刷屏）
 - **公式排版**（0.7.1）：run 级 `superscript`/`subscript`，PPTX 原生基线偏移 + HTML `<sup>`/`<sub>` 双端一致；禁止 Unicode ᵀ 与字面 ^/_ 记法
@@ -31,6 +31,7 @@ DSH（DeepSeek Harness）PPT 工作室插件：**简报（听众/场景/目标/�
 - **依赖感知修改循环**：`ppt_scene_check` 按页级指纹比对，只把变更页列入 revalidated（未变页沿用结论）；SKILL.md 提供改动影响范围表（Slide/Section/Deck 三级）
 - 12 套内置主题、17 种页型（含时间轴/对比/大数字/流程/多卡片/层级/图标要点）
 - 确定性校验器保障文字与图的位置：越界 / 文本互压 / 文字容量估算 / 图片登记 / 图表数据
+- **像素自审（0.22.0，warning 级）**：`ppt_deck_render` 后自动逐页 headless 截图 + 启发式（近乎空白/左右失衡/垂直重心——结构校验判不了的"看上去不对"）；截图落 `preview/audit/` 供肉眼复核；`ppt_scene_check` 带 `visualAudit:true` 只审变更页；浏览器缺失静默降级
 - 全程 JSONL 结构化日志 + report.json，`ppt_log_query` 可按阶段/页号/级别过滤排查
 - 生图接口预留（OpenAI 兼容协议，环境变量配置即启用；未配置自动降级为形状/占位框）
 - 本仓库不依赖任何 `@deepseek-ai/*` 包即可运行与测试（纯 Node），cordis 入口薄封装供 DSH 宿主加载
@@ -70,8 +71,8 @@ node lib/cli.js ppt_log_query '{"deckId":"<id>","tail":20}'
 | `ppt_page_write` | 5 | 写/改单页场景，native 双路径：**content 内容模式**（只传标题/条目/图表数据，版式引擎按页型模板自动排版——0.11.0，弱模型主路径）或手写 elements（默认整页替换、丢元素拒绝保存；`append:true`+`remove:[id]` 合并语义、`allowDrop:true` 确认删除）；error 级问题拒绝落盘；TOKEN/密度/结构匹配/配图计划/证据来源/要点预算校验（按 strictness 分级）；run 级上下标支持公式排版 |
 | `ppt_page_skeleton` | 5 | 写页辅助（0.11.0）：按蓝图页一键生成**通过全部校验的骨架占位页**（版式引擎 + 概要确定性切分），落盘即可预览；随后 `append:true` 同 id 原位替换占位文字 |
 | `ppt_preview_update` | 5/8 | 即时预览：毫秒级刷新已写页面的 HTML 预览（不出 PPTX、免 sceneHash），每阶段首开各只自动弹一次浏览器，边生成边看；确认点含 prototype 的 Prototype 关卡也走它 |
-| `ppt_scene_check` | 6 | 全册校验 + 跨页集成检查（版式单调/多样性/视觉节奏/叙事链/标题结论感）+ sceneHash 指纹；**依赖感知**：返回变更页清单 revalidated + **storyline 叙事链摘要** + **duration 时长估算** |
-| `ppt_deck_render` | 7 | 渲染 PPTX + 预览 HTML + report.json（只认锁定令牌） |
+| `ppt_scene_check` | 6 | 全册校验 + 跨页集成检查（版式单调/多样性/视觉节奏/叙事链/标题结论感）+ sceneHash 指纹；**依赖感知**：返回变更页清单 revalidated + **storyline 叙事链摘要** + **duration 时长估算**；`visualAudit:true` 对变更页做 headless 截图像素自审（warning 级提醒，不进校验闸门） |
+| `ppt_deck_render` | 7 | 渲染 PPTX + 预览 HTML + report.json（只认锁定令牌）；渲染后自动逐页像素自审（headless 截图，提醒与截图落 preview/audit/；`PPT_STUDIO_VISUAL_AUDIT=0` 可关） |
 | `ppt_asset_register` | 横切 | 登记本地图片（格式/尺寸/sha256 校验，冻结进 deck） |
 | `ppt_image_generate` | 横切 | 内网生图接口（未配置返回降级建议不报错） |
 | `ppt_deck_find_replace` | 横切 | 批量查找替换（dryRun 预览影响面 / scope 范围 / 正则），改完增量 check |
@@ -92,9 +93,10 @@ src/
 ├── preview-server.ts 预览静态服务（node:http，零依赖）
 ├── config.ts         行配置 + 环境变量解析
 ├── schema.ts         场景数据模型（zod：brief/plan/outline/section/tokens/spec/page/element）
-├── themes.ts         12 套主题（色板/渐变/图表色/字体）+ buildDesignTokens
+├── themes.ts         12 套主题（色板/色阶/图表色/字体）+ buildDesignTokens
 ├── autolayout.ts     版式引擎（0.11.0）：content 语义内容 → 按页型模板+锁定令牌确定性展开为元素清单
 ├── validate.ts       确定性校验器（越界/重叠/文字容量/资产/图表/令牌/密度/配图计划）
+├── visual-audit.ts   像素自审（0.22.0 T3-4）：headless 截图 + 确定性启发式（空白/失衡/重心）
 ├── deck-store.ts     deck 工作区与状态机（原子写、sceneHash）
 ├── logger.ts         JSONL 日志 + report.json
 ├── assets.ts         图片登记（尺寸解析/sha256/冻结）
@@ -204,11 +206,122 @@ skills/dsh-ppt-studio/
 
 ## 已知取舍
 
-- 渐变背景/渐变填充在 PPTX 端回退为 from 纯色（渲染备注会记录，report.json 可查）；HTML 预览为真渐变
+- ~~渐变填充在 PPTX 端回退为 from 纯色~~ **0.19.0 起结构页渐变双端一致**（HTML=CSS 渐变，PPTX=光栅化 PNG 垫底，scene.background.color 保留渐变起点作回退底）；该回退仅剩模型手写的元素级渐变填充（渲染备注会记录，report.json 可查）
 - 预览中的图表为 SVG 矢量重绘（与 PPTX 原生图表风格一致、数据相同，像素不逐像素相同）
 - pptxgenjs 对页面尺寸有 ±几十 EMU 的取整（13.3333in ≈ 12192000 EMU，PowerPoint 打开显示一致）
 
 ## 修复记录
+
+### 0.23.0（2026-09-27）：图示词表扩三种 + 像素自审存量回放校准 + SKILL 瘦身
+
+- **图示 JSON 词表 5→8 种**：新增 `pyramid`（金字塔/分层论证，3-5 层，nodes[0]=顶层——塔身居左只放层号，标签列居右随层对齐 + 虚线引导线：顶层宽度放不下文字，文入塔内必溢出，venn 同款教训的预防）、`funnel`（漏斗/转化，3-6 段上宽下窄，label/sub 入带内，最窄底段实测放得下）、`cycle`（循环/飞轮，2-6 节点环形接力：环上圆徽章 + 顺时针弧箭头，标签沿径向放环外四向锚定、≤8 字）。层色自顶向下 primary 色阶由深到浅（转化/递减语义）；单测 +3（截断/几何/弧箭头计数），视觉门两主题 × 三图示 6/6 pass（cycle 副标签 10px 发虚已提到 11px）；
+- **像素自审存量回放校准（14 册存档 deck × 304 页全量真实 Edge 截图）**：首轮回放 21 条提醒，逐条归因四类——①toc 页 5 条为**设计性误报**（引擎左竖条目录本就设计性不对称）→ 结构页（cover/toc/section/closing）免判 H/V；②密排满版页 5 条 cy 0.71-0.72 为**阈值边缘噪声**（底部装饰条拉低质心）→ V 带放宽 0.30–0.70 → 0.26–0.74；③0.12 修复前的 9-20 时代 deck 8 条为**真阳性**（右半幅全空 + 质心 0.28-0.32，正是 0.19/0.20 治的病）；④零 EMPTY 误报、diagonal/dots 纹理主题全干净（底噪地板跨纹样有效）。复跑验证：校准后仅 0.17 时代 1 条边缘 H 存留，其余全清——**warning 可信度成立**。回放脚本 `sessionlog/replay-audit-022.mjs` 可复跑；
+- **SKILL.md 瘦身（48.9KB → 47.4KB，-3.1%）**：43 处纯冗余替换（错误写法表 3 行与其他段落重复、两处相同的自动开窗说明、遍布全文的版本号考古标注）+ `ppt_page_write 常见错误写法` 对照表下放 `reference/error-shapes.md`（与工具 auto-fix/repairs 回执及写页语义段重复的预防性对照表，正文留最高频三坑摘要）。审计结论：文件密度高是设计使然（每条纪律有事故背书），安全瘦身空间有限——激进重构明确不做。
+
+### 0.22.0（2026-09-27）：像素自审闭环（roadmap T3-4 落地）+ 预览懒注册
+
+- **页面视觉自审（T3-4，"盲写"循环的最后一环）**：新增 `src/visual-audit.ts`——逐页渲染与播放器**共用同一份页面 CSS** 的独立单页 HTML（`renderPageAuditHtml`，deck 钉 (0,0) 整尺寸 1280×720），headless Edge/Chrome 截图（每页独立 user-data-dir，连拍共用 profile 会静默不截）→ `decodePng` 像素解码 → 确定性启发式。规则三条（全 warning 级，不进 issues 闸门、不拦渲染）：`VISUAL_EMPTY`（整页近乎空白/只有纹理铺底——画框忘字类）、`VISUAL_BALANCE_H`（左右失衡——0.19 icon-list 旧病）、`VISUAL_BALANCE_V`（垂直重心出界 0.30–0.70）。**校准三课**（冒烟实测驱动）：① 背景纹理（0.18.0 渲染器注入）与整宽装饰条对每条竖列带贡献均匀 ~2–3%，直接算占比会稀释失衡判定——地板取 24 列带密度的第 10 百分位、失衡按"占据带"数判（半幅近乎全空 = 占据带 ≤1）；② 地板不能用中位数——"只有一条整宽标题带"的页面会被整条吞掉（单测抓出）；③ tint50 卡底与纹理在像素上同档（距底色都 ≈17，无阈值窗口）——**场景声明了整宽容器卡（shape 宽 ≥75% 画布）就信结构免判横向**（`hasFullWidthContainer`），位图照片页（assetId 图）双向免判。挂接两处：`ppt_deck_render` 渲染后**自动全册自审**（截图落 `preview/audit/<pageId>.png`，预览 URL 拼相对路径可直接看；回执逐条列出提醒）；`ppt_scene_check` 新增可选参数 `visualAudit:true` 只审变更页（修改循环聚焦，每页约 2s）。环境变量：`PPT_STUDIO_AUDIT_BROWSER` 指定浏览器路径（缺省自动探测 Edge/Chrome 常见安装位），`PPT_STUDIO_VISUAL_AUDIT=0` 关闭 render 自审；浏览器缺失/截图失败一律静默降级为 note，绝不阻断；
+- **预览服务懒注册**：deck 未命中或访问列表页时重查全局工作区注册表合并新根——**新工作目录首场 PPT 后不再需要重启预览服务**（此前是启动时一次性读入注册表，0.21.0 及之前要手动重启 3170 才能预览新目录的 deck）；
+- 单测 +12（启发式合成像素网格 9：均衡/左重/顶压/空白/渐变跳过/卡底阈值/底噪回归/容器谓词/skipH；懒注册 2；svg 页拒编 1）共 193 项全过；E2E 冒烟 `sessionlog/audit-smoke-022.mjs`（真实 Edge：左重页被 BALANCE_H 抓住、icon-list/图表/结构页零误报、render 自动自审 + 6 张真 PNG 截图断言）。
+
+### 0.21.0（2026-09-25）：AiPPT 借鉴 P1–P4 全落地
+
+- **P1 预览就地编辑（MVP）**：播放器加编辑层（`E` 键或「编辑」按钮）——点选元素（虚线框）、拖动/方向键移动（方向键 0.02in 步进、Shift 0.1in；px→in 按 96dpi 且除以播放器缩放）、双击文本就地改字（textarea 逐行预填，逐行替换段落/runs 文本，Ctrl+Enter 提交、Esc 取消）；「保存」POST 到预览服务新端点 `POST /ppt-studio/<deckId>/edit`——**写前跑与 ppt_scene_check 同路的确定性校验（error 拒写、改动不落盘）**，落盘 pages/*.json 并标记 state `handTunedPages` + contentOutdated/renderOutdated（sceneHash 自然失配，回会话 ppt_scene_check + ppt_deck_render 收口），预览即时重渲。`ppt_deck_status` 回执亮「✍️ N 页经手动微调」——SKILL 硬规则：模型重写这些页前必须与用户确认（ppt_page_write 整页替换会覆盖手改）。svg 自由绘制页不支持（文字嵌在整页源码）；file:// 双击打开无回写通道（保存时提示）。实现教训：模板字面量里嵌 JS 的正则/换行必须双写反斜杠（`\s` 会被剥成 `s`）、IIFE 前要补分号防 ASI 吞并——浏览器 E2E（browser-use 实测选/移/改/存全链路）抓出三处此类缺陷；
+- **P2 外部 PPTX 模板导入（轻量：主题抽取）**：新工具 `ppt_theme_import`（deckId+path）——零依赖解包（fflate）读 `ppt/theme/theme1.xml`：clrScheme 12 语义色（srgbClr/sysClr lastClr）+ fontScheme（major/minor latin+ea，`+mj-lt` 占位名过滤）→ 派生完整 8 色板建议（primary=accent1 过亮/过黑回退 dk2→accent2；secondary=accent2 过近明暗派生；accent=accent3-6 择距最大者否则色相旋转 165°；深浅底自适应 onPrimary/surface/textMuted）+ 字体建议；只建议不代用，用户认可后带进 `ppt_design_lock`。与 0.18.0 品牌取色互补（图提色 vs 模板提整套主题）；
+- **P3 形状库 16→26 种**：+octagon/plus/donut/frame/can/teardrop/pie/lightningBolt/cloud/heart——pptxgenjs 原生预设名直写（SHAPE_NAME 扩表），HTML 端多边形形状用 CSS clip-path polygon、曲线/空心形状用播放器注入的 objectBoundingBox SVG clipPath（`SHAPE_CLIP_DEFS`）；路径全部按 OOXML 几何自写（GPL 红线：不搬 geometry.js 数据表），cloud 三轮视觉评估修复（最终三叶圆弧构型）；
+- **P4 动画预设目录**：`skills/dsh-ppt-studio/reference/animation-presets.md`——`<p:timing>` XML 骨架、presetClass/presetId 事实表（entr/emph/exit 三类同编号）、presetSubtype 方向编码（1-8 罗盘序）、startType 时序、切场 `<p:transition>`、落地路径（post-zip XML 注入，fflate 已在依赖）与纪律建议（默认无动画、白名单 5 预设）；数值事实从本地参考实现核对（只核对数据未拷代码）；
+- 单测 +9（形状双端断言 prstGeom/clip defs、theme-import 抽取派生、编辑端点合法/非法/越界/坏请求）共 178 项全过；E2E：临时预览服务 + browser-use 实测编辑全链路（选/移/改字/保存/落盘/重渲/状态标记逐项断言）。
+
+### 0.20.0（2026-09-25）：版式与图示扩容（roadmap T3-5/T3-2 落地，0.19.0 PPTX 端验收闭环）
+
+- **icon-list 重做为整宽行卡（T3-5）**：旧版"徽章+左置单列文本"右半幅 ~55% 空置、重心偏左（0.19.0 视觉门对 12 主题的共同判决）——改为每条目一张全宽圆角行卡（左端图标徽章 + 文字垂直居中，条目少时整块垂直居中），`layout.card` 支持 tint/solid(默认)/plain 变体；8 条密集档行高自适应、徽章随之缩。视觉门 3 主题 × 4 变体 + bullets 对照 15/15 pass（"结构性改进而非微调"）。bullets 保持旧版式（全宽文本框 + 0.12.0 稀疏自适应，视觉门判定可接受）；
+- **图示 JSON 词表 2→5 种**：新增 `venn`（2-3 集合交集，半透明圆片叠加、集合名置圆外——初版标签落圆内压线经视觉评估修正锚点几何）、`matrix`（2×2 四象限，恰好 4 节点左上→右下，超量截断）、`tree`（根 + 单层子树 ≤5，肘形母线连线）；schema 词表与 SKILL.md 同步，单测 +6（content2）；
+- **文化类主题标题衬线（T3-2）**：gov-red/warm-sunset 标题 = SimSun（政务庄重/文化叙事）、cream-notes 标题 = KaiTi（手账亲和），正文保持雅黑；只动 `fonts.title`，锁定令牌链路天然携带，目标机器缺字体时 HTML/PPT 双端回退雅黑无害。坑（已记 roadmap）：楷体 family 名必须 `KaiTi`——`SimKai` 是 WinXP 别名，Win7+ 的字体匹配不认，会静默回退雅黑（视觉评估抓出）；
+- **T3-3 归档**：核实密度默认已 normal（body 16pt），visual 配比已被 0.16.0 visualStyle 三档 + 0.17.1 蓝图期闸门（visual<1/3 拒锁）+ VISUAL_RATIO_LOW 覆盖，比原设想的"建议"更强，无需另做；
+- **0.19.0 PPTX 端验收闭环**：`sessionlog/pptx-verify-019.mjs` 对 business-blue/tech-dark/navy-gold 三主题渲染真实 PPTX——断言封面 slide 含 (0,0) 整幅垫底图、media 真 PNG、渐变角部像素≈端点色（±12）、封面文字对渐变较亮端 ≥3:1，18/18 PASS（color-extract.ts 的 `decodePng` 为此导出）；
+- 验证脚本留 `sessionlog/`：iconlist-check-020.mjs / shoot-020.mjs（行卡 15 张）、illustration-check-020.mjs / shoot-ill-020.mjs（图示 6 张）、shoot-serif-020.mjs（衬线 6 张）；themes.md 由 THEMES 数组再生成（含字体行）。
+
+### 0.19.0（2026-09-25）：主题模板整体重制 + 结构页双色渐变（roadmap T3-1 落地）
+
+- **12 套主题配色全部重制**（用户反馈"现在的都好丑"）：按 2026 设计趋势（深青/梅紫/暖中性/波斯橘，参考 Slidesgo/Pinterest Palette 趋势报告）+ 60-30-10 中性留白重调——primary 全面加深为"墨蓝/朱砂/碧玉/深林"级锚色、secondary 构成封面双色、accent 改更克制的点缀（黄橙→波斯橘等）、bg 纸感化（冷纸/暖纸/粉青），主题名与 mood 同步更新（商务蓝→墨蓝商务、科技深色→深空霓虹、政务红→朱砂映金、清新青绿→碧玉青、暖阳渐变→珊瑚暮色、靛蓝渐变→靛紫极光、墨绿学术→深林墨绿、藏蓝鎏金→午夜鎏金、工业灰橙→石墨信号橙）；12 主题 onPrimary 对渐变两端对比全部 ≥3.3:1（封面标题 40pt 粗体标准），正文/弱化色对比全数达标；
+- **结构页双色渐变（取代 0.15.0 的纯色主底取舍）**：封面/章节/结尾由"整片平涂 primary"升级为**渲染器注入的双色对角渐变**——HTML 端 CSS linear-gradient、PPTX 端整册光栅化一次 100PPI PNG 垫底（复用 0.18.0 纹理管线思路，`src/texture.ts` 新增 `renderGradientSvg`，CSS 角度语义、盒交点端点换算）；sceneHash 不受影响、旧 deck 重渲染即得、paletteOverrides 自动跟随。当时弃用渐变是因为 PPTX 端只能回退纯色，0.17.2 光栅化落地后该约束已不存在；
+- **深色锚封面主题令牌**：`Theme`/`DesignTokens` 新增可选 `structuralGradient{from,to,angle}`（tech-dark 深空蓝→深堇紫、navy-gold 午夜藏蓝→亮藏蓝；内容页 primary 仍是霓虹青/香槟金——满幅亮色封面在视觉评估中被判"像默认模板/土豪金"）；结构页文字/点缀条/底条颜色由 `structuralTextColor` 按渐变较亮端亮度确定性派生（<0.22 → 白，否则 onPrimary——浅色主题派生结果与 onPrimary 一致，不引入新自由度）；旧 deck 无此字段回退 primary→secondary 派生，观感与旧版一致；
+- **深底主题装饰大圆修色**：tints 浅档向 bg 混色在深底上会把金色相混成灰褐（navy-gold 实测 #54534D 脏圆），深底改取向白锚的 tint600（亮金/亮青），浅底维持 tint200；
+- **内容页标题下短横条由 primary 改 accent**：accent 原本只在图表/章序号露出，石墨灰主色类主题整个内容页无主题点缀色（slate-orange 被视觉评估判"像未套色的默认灰主题"）；12 主题 accent 对各自 bg 均过装饰可见性双指标（回归零误报）；
+- **`ppt_section_draft` 页数不匹配报错升级为定向补救指引**：缺页/多页分两个方向——缺 N 页→"在已传入页基础上再生成 N 个新 page 对象凑满 X 个一次重交（整段覆盖，必须带全量）"；多 N 页→"删掉 N 个信息量最低的页后重交"；"改分配"降为备选并声明代价（改变用户已确认的总页数，需征得同意）；
+- `reference/themes.md` 改为由 THEMES 数组确定性生成（本次起用脚本再生成，防漂移）；SKILL.md 阶段 2 报错指引同步；
+- 单测 166 项全过（新配色零 DECORATION_CONTRAST 误报）；视觉验证四轮：12 主题 × 封面/icon-list 24 张 headless Edge 截图全 pass（slate-orange 橙色缺失、tech-dark/navy-gold 封面廉价感、深底金圆脏色逐轮修复）；验证脚本 `sessionlog/theme-samples-019.mjs` + `shoot-019.mjs`。
+
+### 0.18.0（2026-09-25）：视觉素材第二梯队 + 品牌取色（roadmap T2-1/T2-2/P5 落地，T2-3 裁决不做）
+
+- **内置图标包（T2-1）**：新增 `src/icons.ts`——83 个自绘线稿图标（24×24 viewBox / stroke 2.4 / round cap&join / fill none，非逐行搬运任何 GPL 图标库；无 `<text>` 不依赖光栅化字体、无外链守内网红线）。icon-list 的序号数字、cards 网格/行卡节点、timeline 竖/横轴节点全部升级为**图标徽章**（色阶圆片 + 令牌色线稿，走 image.svg 既有链路：HTML 内联 + PPTX 光栅化 PNG）。content 可显式给名（`icon-list.icons[]` 与 items 平行 / `cards[].icon` / `events[].icon`），**缺省按条目文本关键词确定性自动选**（长关键词权重更高；无命中按文本哈希落 8 个中性图标，同文本永远同图标），未知名自动回退并记 layoutNote；词表与关键词映射见 `skills/dsh-ppt-studio/reference/icons.md`；
+- **徽章配色自适应（视觉评估两轮修正）**：浅色底圆片取"能过装饰可见线（RGB 距 ≥75）的最浅色阶"（tint200 起逐档加深——business-blue 取 200，warm-sunset 类低饱和主色落 300）+ tint700 深字形；深色底 tint600 亮圆 + bg 深字形；旧 deck 无色阶回退 primary 圆 + onPrimary 字形。初版 tint300 圆叠 primary 字形对比仅 ~2:1、线宽 2 在 0.3in 物理尺寸下偏细——评估驱动改为上述策略 + 线宽 2.4 + 字形占比 0.62；
+- **主题化背景纹理（T2-2）**：`design/tokens.json` 新增可选 `texture{kind,color,opacity}`（旧 deck 无此字段 = 无纹理，向后兼容）——12 主题按气质确定性映射纹样（dots 点阵=商务学术 / diagonal 斜线=科技 / lattice 窗棂=文气庄重），颜色取色阶（浅底 primary-300@0.42、深底 primary-600@0.38——深底存在感衰减需补偿），`ppt_design_lock` 新参数 `texture:auto|dots|diagonal|lattice|none` 可覆盖/关闭。**渲染器注入而非页面元素**：HTML 端内容页（无显式页面背景）整页内联 SVG pattern 垫底、结构页不注入；PPTX 端整册光栅化一次（100PPI 透明 PNG ≈20KB/页）复用——sceneHash 不受影响、手写页与 content 页同享、旧 deck 重新渲染即获得底纹；
+- **品牌图取色派生主题（P5）**：新增 `src/color-extract.ts` 零依赖实现——PNG（含调色板/灰度/带 alpha，自适应逆滤波）与 BMP 解码采样、SVG 源码 hex 收集（JPEG/WebP/GIF 暂不支持并在回执说明）；近黑/近白/低饱和灰剔除、4bit 桶聚类、同色系（RGB 距 <70）合并、≤3 色按频率输出。`ppt_asset_register` 登记品牌 logo/VI 参考图时自动提取并附 `paletteSuggestion`（primary=最高频色，secondary=次高频或同族明暗派生，accent=第三色或主色色相旋转 165°）——**只建议不代用**，用户认可后把这份 paletteOverrides 带进 `ppt_design_lock`（品牌化新路径，与 copyFromDeckId 模板复用互补）；
+- **T2-3（生图端点配置）裁决不做**：内网红线下无可用端点（2026-09-25），配图供给由词表图示 + illustration 图示 JSON + 用户图登记覆盖；
+- 单测新增 32 项（icons/texture/color-extract + 版式接入不变量），全套 166 项通过；视觉验证：浅/深主题 × icon-list/cards/timeline/bullets 六页 headless Edge 截图评估通过，PPTX 冒烟（媒体全真 PNG、无 svg 条目）通过。
+
+### 0.17.3（2026-09-23）：process 流程卡 chevron 文字被燕尾凹口切入（真事故 d20260923-001312 p019）
+
+- **根因**：process 页默认横向 flow 变体中，步骤标题文字框与 chevron（燕尾箭头）形状同位同宽——凹口/箭头尖各占约卡片高的一半，首尾字落在形状外的底色上，白字叠浅底"看不见"（用户反馈"文字超出图形，部分文字看不见"；四卡首字全被凹口切入）；
+- **修复**：标题文字框左右各内缩 min(0.6, 卡高/2)，卡片加高 1.1→1.3 给两行标题留空间，说明文字 y 3.95→4.15 避开加高的卡；
+- 已落盘 deck 的修复页按同公式改 pages/*.json 后重算 sceneHash 重渲染即可。
+
+### 0.17.2（2026-09-23）：PPTX 端 SVG 图示在 WPS/旧版 Office 不显示（真事故 d20260923-001312）
+
+- **根因一**：元素级与整页内联 SVG 此前以 `image/svg+xml` data URI 交给 pptxgenjs，落盘为"主 blip 伪 PNG + svgBlip 扩展"双 media——fallback 的 `.png` 只是原样复制 SVG 字节，PowerPoint 2016+ 走 svgBlip 能显示，WPS / 旧版 Office / 第三方预览器只读主 blip，解码失败即整块图示消失（HTML 预览内联渲染不受影响，故"预览有图、PPT 没图"）；
+- **根因二**：`normalizeSvgRoot` 重写根标签时把原 `viewBox` 留在 keptAttrs 又无条件补一个——落盘 SVG 根标签全部带**双 viewBox**（浏览器容忍故预览无感，resvg 等严格解析器直接拒绝）；
+- **修复**：新增 `src/rasterize.ts`（`@resvg/resvg-js`，新依赖，预编译 napi），嵌入前把 SVG 光栅化为 200PPI 真 PNG（`fitTo: width` 等比缩放，根标签重复 viewBox 防御性去重以兼容已落盘 deck）；`normalize.ts` 源头重写时剥掉原 viewBox 保证根标签有且只有一个；`render-pptx.ts` 元素级（`el.svg`）与整页（`page.svg`）两处嵌入统一走光栅化，光栅化不可用（库缺失/渲染异常）回退旧的矢量嵌入不阻断出片；渲染备注文案随实际嵌入形态输出；
+- **回归测试**：`tests/rasterize-pptx.test.ts` 断言渲染产物包内 `ppt/media/` 全部为真 PNG 魔数、不再出现 `.svg` media 条目、双 viewBox 输入可光栅化；`svg-image.test.ts` 断言归一后根标签 viewBox 有且只有一个。
+
+### 0.17.1（2026-09-22）：d20260922-234438 会话五项反馈修复
+
+- **槽位前置校验**：content.type 与大纲页型不符 → 立即报"槽位不匹配"并给两条修复路径（事故：模型把 bullets 内容写进 two-col 槽位，旧报错只说槽位型需要什么字段，模型连败 6 次）；
+- **深色主题提亮**：tech-dark bg #0F172A→#1E293B、navy-gold bg #0E1A2B→#16263C（surface 同步抬升；用户反馈"背景太暗"）；
+- **图少根治（蓝图期闸门）**：`ppt_design_lock` 检查大纲配比——visualStyle=visual 低于 1/3 **拒绝锁定**（改蓝图比写完返工便宜），balanced 低于 1/5 回执警告；结构页型（cover/toc/section/closing）的 visual:image/chart 在 section_draft 归一为 none 并提示（事故：cover 标 visual:image 只能落一个占位）；`VISUAL_PLAN_UNMET` 升 **error**（蓝图承诺配图页面必须有 image/chart 元素——事故：全册 29 页仅 1 个占位图）；
+- **allocation.reason 上限 120→200**（事故：模型写了超长分配理由被 zod 裸拒）；
+- **SKILL 三条纪律**：列主题选项前必调 ppt_themes 且 description 用返回原文（事故：模型自编"迲逓代码示例"乱字）；markdown 表格与上一行之间留空行（事故：表头与标题挤一行导致前端不渲染表格）；visual:image 只标 image-text 页型。
+- 全套 134 项单测通过。
+
+### 0.17.0（2026-09-22）：content 2.0——版式意图词表 + 图示 JSON + 扉页扩容 + 样例真实渲染（用户评审四项决议落地）
+
+- **layout 版式意图（content 2.0 核心）**：content 模式新增受限词表 `layout:{variant,split,divider,card}`——模型做构图选择题、代码执行坐标。覆盖 6 个高频页型：image-text（image-left/right/top + split 图区占比）、two-col/comparison（split 左栏占比 + divider 分隔 + card 底色）、process（flow 横向/steps 竖排）、cards（grid 网格/row 整宽条 + card）、timeline（vertical/horizontal）。词表外值回落默认并记 layoutNote；全部变体通过全部 error 级校验（单测契约）；
+- **图示 JSON（image.illustration）**：`{kind:"flow"|"layers"|"venn"|"matrix"|"tree"|"pyramid"|"funnel"|"cycle", title?, nodes:[{label,sub?}]}` → 代码用锁定令牌渲染矢量图（消灭手写 SVG 标签笔误——真实事故 `</svg viewBox=…>` 解析失败三连败；颜色天然守锁、一册风格统一）；
+- **扉页扩容**：`ppt_section_draft` 传入页数 = 分配+1 且多出为 section 型（章节扉页）→ 自动把该部分分配与总页数 +1 并在回执明示（真实事故：模型为塞扉页砍内容页 → 最终 PAGE_MISSING）；其余超分配仍拒；
+- **样例真实渲染（SOP 重构）**：阶段 3 样例关卡只确认叙事与文案（视觉维度用户看蓝图 JSON 无感知，确认无效）；**代表页真实渲染确认升为 standard 默认关卡**（原 precise 专属）——锁定设计后先写 2-3 个代表页给用户看真实效果，density/visualStyle/风格的反馈在此消化，quick 跳过；
+- 新增 `tests/content2.test.ts`（9 项：变体校验契约/几何差异/未知词回落/plain 免疫/图示渲染守锁/扩容判定正反例），全套 130 项通过。
+
+### 0.16.0（2026-09-22）：写页防线 + 视觉风格开关（真实事故 d20260922-220212 驱动：29 页 deck 目录被写到 p028、封面重复、p011/p012 卡片有框无字、全册零图）
+
+- **OUTLINE_PAGE_MISMATCH（error，校验 41→44 条）**：写页槽位与大纲页型不一致直接拒绝——事故根因是模型按"已写页数"自行编号，内容页从 p002 起写（跳过目录槽位），全册错位两格。修复路径：改页型先重调 `ppt_section_draft` 同步蓝图（SKILL 槽位纪律同步立规）；
+- **EMPTY_CONTAINER（error）**：roundRect 卡片（≥1.5in²）内无任何文字/图/图表即拒绝——长输出被截断重写的"画了框忘了字"特征信号（事故 p011"两个核心权衡"框、p012 右侧暗色卡均空）。纯装饰请用 rect/ellipse；小圆片/徽章（<1.5in²）豁免；
+- **visualStyle 视觉风格（brief 新旋钮，用户在阶段 0 选择）**：`visual`=图文优先——内容页图/图表配比 ≥1/3 硬指标（VISUAL_RATIO_LOW 强制提醒），image-text 页必须给 image.svg 矢量插图或已登记资产；`balanced`=均衡（默认，≥1/5 提醒）；`text`=文字优先——不查配比且 VISUAL_RHYTHM 降 info。回执与 SKILL 按档位给出蓝图纪律；
+- 新增 `tests/outline-guard.test.ts`（11 项：槽位契约/空容器三豁免/配比分档/brief 默认值），全套 121 项通过；
+- 顺带查明：会话日志中 "cannot read D:\proj\dsh\... tokens.json" 是模型自带 read 工具读幻觉路径，非插件缺陷。
+
+### 0.15.0（2026-09-22）：视觉质量第一梯队——色阶系统 + 装饰有效性校验 + 层次三件套
+
+基于真实 deck 诊断（d20260922-000110-1300：11 页 80 文本/49 形状/1 图，8 平色无色阶，装饰同色调叠同色调不可见）落地的三层改造，全部确定性生效（诊断与后续梯队见 `docs/roadmap-visual-quality.md`）：
+
+- **色阶系统（T1-1）**：`buildDesignTokens` 从 8 基色确定性计算 `tints`（primary/secondary/accent 各 50–900 九档；浅档向页面底色方向渐浅、深档向反方向加深，深浅主题同一套语义）；`designTokensSchema` 新增可选 `tints`（旧 deck 的 tokens.json 不带 tints 时版式引擎回落基色，不产生新 warning）；TOKEN_COLOR 锁定色集扩入色阶（引擎产物用 tint 不再误报）；
+- **装饰有效性校验（T1-2）**：新规则 `DECORATION_CONTRAST`（warning，校验 40→41 条）——装饰形状（background:true、实色填充、无描边、不透明度 ≥0.6）与页面背景 WCAG 亮度对比 <2.0 **且** RGB 色距 <75 判为"肉眼不可见"；渐变背景取两端点+中点为候选，任一处不可见即报（真实案例：暗红 #7A1E22 圆叠大红渐变底）；双指标避免误报（亮度对色相盲区由色距弥补）；12 套主题全部页型引擎产物零误报（单测断言）；
+- **层次三件套（T1-3）**：①卡片（two-col/comparison/cards）统一细描边（tint primary-200）+ 轻阴影（shape 新增 `shadow` 字段：color/opacity/blur/angle/offset，PPTX outer shadow 与 HTML box-shadow 双端一致，angle 0=右/90=正下与 OOXML 约定一致）；②结构页重设计：弃整页渐变，改**纯色主底 + 右上色阶大圆（tint-200 出血）+ onPrimary 底条 + 标题居中点缀条**，封面标题组垂直重心居中（旧版偏下、下方留白失衡）；③icon-list 圆片改明暗感知色阶实色（浅色页 tint-300 / 深色页 tint-600，替代 opacity 混色）；hierarchy 素层描边用 tint-300；
+- **不改的**：状态机/闸门/工具清单（20 个）/17 页型语义/内网红线全部原样；heroGradient 字段保留在 Theme 定义（引擎不再消费）。
+- 新增 `tests/visual-quality.test.ts`（14 项），全套 110 项通过。**注意：插件升级后 sceneHash 版本盐变化，存量 deck 渲染前需重跑 ppt_scene_check；已写页面不自动重排**（新视觉只影响升级后的新写页与重新 design_lock 的令牌）。
+
+### 0.14.0（2026-09-21）：模型档位 weak/strong——强模型升级（elements 主路径 + 表达面扩充 + 防御放宽）
+
+对比 genoffice（强模型直写页面 spec + 事后视觉 QC）后落地的强模型适配：**版式权部分归还模型、防御机制按档位放宽、校验/令牌/红线原封不动**。核心是新的正交旋钮 `brief.modelProfile: weak | strong`（与 confirmStages/evidenceLevel/strictness 互不耦合）：
+
+- **简报默认值**：strong 档未显式指定 mode 时默认 `quick`（打包一次方向确认；显式 mode/confirmStages 照旧优先）；brief 落盘 `modelProfile` 并在回执展示档位说明；
+- **写页路径重定位**：elements 手写精细版式升为 **strong 档主路径**（content 内容模式保留为两档通用快路径，weak 档主路径不变）——工具描述与 SKILL 按档位重写推荐顺序；
+- **排版纪律移植**（借鉴 genoffice 用强模型量产页面沉淀的 prompt 法则，写进 ppt_page_write 工具描述与 SKILL 阶段 5）：文字容量自估公式（CJK 字宽 ≈ 字号pt×1.35/72 in、行高 ≈ ×1.8/72、数折行留一行余量）、间距下限（文字距卡片边 ≥0.08in 等）、反 AI 味铁律（禁卡片左竖条/顶部色条/彩虹卡、封面要有视觉锚点）、内容铺满画布；
+- **elements 表达面扩充**：形状 9→16 种（+hexagon/parallelogram/trapezoid/leftArrow/upArrow/downArrow/star5，全部有 OOXML 预设与 HTML clip-path 双端实现）；shape 与 image 新增 `rotation`（-180~180 度，装饰用途；校验按未旋转外接框——大角度旋转装饰建议 background:true）；
+- **成功路径回审计摘要**（借鉴 genoffice layout-audit 习惯）：写页成功全过给显式「版式审计 ✅」；有版面类 warning（溢出风险/互压等）点名建议**当页即改**不攒到全册校验；
+- **防御机制档位门控**：strong 档弱模型辅助闩锁**不自动开启**（强模型失败是正常迭代，闩锁降级语义反而碍事；已开的旧闩锁与 overrideAssist 语义不变）；熔断阈值按 deck 档位分档（weak 5 次 / strong 8 次，报错提示同步分档）——deepRepair 容错归一保留但不再为新形态扩展（强模型 + 规范 tool-calling 不产出 `{"item":[…]}` 形态）；
+- **不改的**：40 条校验规则、令牌锁定、evidence/内网红线、sceneHash 双闸门、状态机与断点续跑全部原样——强模型改变的是版式权归属与迭代成本，不改变确定性校验哲学。
+
+新增 `tests/model-profile.test.ts`（8 项）：档位默认值/显式优先、strong 闩锁不开启、新形状+rotation 的 schema/校验/双渲染、rotation 超界拒绝、版本一致性。工具数不变（20）；SKILL.md 新增「模型档位」节 + 阶段 5 手写元素纪律。
 
 ### 0.13.0（2026-09-21）：模型生成 SVG 矢量插图（无生图接口时的配图路径）
 

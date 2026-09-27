@@ -7,7 +7,7 @@
  */
 import { z } from 'zod'
 import type { DeckBrief } from '../schema.js'
-import { deckBriefSchema, paletteOverridesSchema, renderRouteEnum } from '../schema.js'
+import { deckBriefSchema, paletteOverridesSchema, renderRouteEnum, visualStyleEnum } from '../schema.js'
 import { getTheme, THEMES } from '../themes.js'
 import { createDeckLogger } from '../logger.js'
 import type { ResolvedPptStudioConfig } from '../config.js'
@@ -40,7 +40,9 @@ const argsSchema = z.object({
   tone: z.string().max(80).optional(),
   density: z.enum(['sparse', 'normal', 'dense']).optional(),
   mode: z.enum(['quick', 'standard', 'precise']).optional(),
+  modelProfile: z.enum(['weak', 'strong']).optional(),
   renderRoute: renderRouteEnum.optional(),
+  visualStyle: visualStyleEnum.optional(),
   evidenceLevel: z.enum(['none', 'business', 'academic']).optional(),
   strictness: z.enum(['relaxed', 'normal', 'strict']).optional(),
   confirmStages: z.array(z.enum(['brief', 'outline', 'pageplan', 'blueprint', 'design', 'prototype'])).max(6).optional(),
@@ -59,7 +61,8 @@ export function createBriefTools(config: ResolvedPptStudioConfig): ToolDefinitio
       description:
         'PPT 制作第 a 步：用户选定主题、确认听众/场景/目标/时长后调用。落盘简报（标题/主题背景/听众/场景/演讲目标/时长/主题风格/生成模式/证据等级）并创建 deck 工作区。' +
         'objective（演讲目标）决定整套 deck 的取舍——同主题给中学生科普与给 CTO 讲技术路线是完全不同的 PPT，必须与用户确认。' +
-        'mode（quick/standard/precise）决定后续确认闸门数量，未问过用户时默认 standard。' +
+        'mode（quick/standard/precise）决定后续确认闸门数量，未问过用户时默认 standard（modelProfile=strong 时默认 quick）。' +
+        'modelProfile（0.14.0 模型档位）：weak=弱模型防御性 SOP（默认——content 内容模式优先、连败自动降级兜底）；strong=强模型——elements 手写精细版式为主路径（形状词汇表扩充+rotation）、未指定 mode 时默认 quick、连败兜底不再自动开启。校验规则与内网红线两种档位完全一致。' +
         '返回 deckId 与简报全文，必须按 mode 对应的确认方式展示给用户；确认后进入第 b 步 ppt_outline_draft 生成叙事架构。' +
         '中文：创建 PPT 简报（听众/场景/目标/时长/风格/模式），等待用户确认。',
       parameters: {
@@ -80,11 +83,23 @@ export function createBriefTools(config: ResolvedPptStudioConfig): ToolDefinitio
             description:
               '生成模式（用户已选定，只是确认点预设的捷径）：quick=无逐阶段确认（打包一次方向确认），其余采纳建议值快速产出；standard=默认，逐阶段确认（大纲/页数/设计）；precise=standard 基础上加 Prototype 真实预览确认关卡。叙事/证据严格度用 strictness/evidenceLevel 另行设置',
           },
+          modelProfile: {
+            type: 'string',
+            enum: ['weak', 'strong'],
+            description:
+              '模型档位（0.14.0，驱动模型画像而非校验）：weak=当前驱动模型较弱（8B 级/小模型，默认）——写页优先 content 内容模式与骨架+增量，连败自动降级兜底；strong=强模型（Claude/GPT/Gemini/GLM-4 级，结构化输出可靠）——写页以 elements 手写精细版式为主路径（可用形状词汇表 16 种 + rotation 旋转），未指定 mode 时默认 quick，弱模型辅助闩锁与熔断阈值放宽。校验规则、令牌锁定、内网红线两档完全一致',
+          },
           renderRoute: {
             type: 'string',
             enum: ['native', 'svg'],
             description:
               '渲染路线（0.10.0，用户已选定，必须向用户说明取舍后再选）：native=pptxgenjs 原生元素（默认）——文本/形状/图表/表格逐元素可编辑，受全部确定性版式规则保护（越界/互压/文字容量/密度）；svg=自由 SVG 绘制——视觉自由度最高（任意路径/渐变/构图，viewBox 0 0 1280 720），HTML 预览原生内联，但 PPTX 端是整页矢量图（PowerPoint 2016+ 显示，可右键"转换为形状"部分恢复编辑）且确定性版式规则不适用（只有安全面/色板/画布校验）——版式质量靠预览肉眼把关',
+          },
+          visualStyle: {
+            type: 'string',
+            enum: ['text', 'balanced', 'visual'],
+            description:
+              '视觉风格（0.16.0，用户已选定）：visual=图文优先——内容页图/图表配比目标 ≥1/3（校验强制提醒），image-text 页必须给 image.svg 矢量插图或已登记资产；balanced=均衡（默认）——配比 ≥1/5 提醒；text=文字优先——不要求配图，视觉节奏规则降为提示（纯文字讲义/答辩场景）',
           },
           evidenceLevel: {
             type: 'string',
@@ -141,8 +156,16 @@ export function createBriefTools(config: ResolvedPptStudioConfig): ToolDefinitio
           }
           lines.push(`主题风格：${brief.themeId}${brief.tone !== undefined ? `（${brief.tone}）` : ''}`)
           lines.push(`生成模式：${brief.mode}${brief.evidenceLevel !== 'none' ? `（证据等级 ${brief.evidenceLevel}）` : ''}${brief.strictness !== 'normal' ? `｜校验强度 ${brief.strictness}` : ''}`)
+          if (brief.modelProfile === 'strong') {
+            lines.push('模型档位：strong（强模型）——写页以 elements 手写精细版式为主路径（形状 16 种 + rotation），content 内容模式保留为标准快路径；连败兜底（弱模型辅助/低阈值熔断）不自动介入。校验与红线不变。')
+          }
           if (brief.renderRoute === 'svg') {
             lines.push('渲染路线：SVG 自由绘制（视觉自由度最高；PPTX 端为整页矢量图、PowerPoint 2016+ 显示，版式确定性校验不适用——写页后务必 ppt_preview_update 肉眼把关）')
+          }
+          if (brief.visualStyle === 'visual') {
+            lines.push('视觉风格：图文优先——蓝图阶段内容页 visual∈{image,chart} 占比要 ≥1/3（全册校验强制提醒 VISUAL_RATIO_LOW）；image-text 页必须给 image.svg 矢量插图或已登记资产，不允许只出占位框。')
+          } else if (brief.visualStyle === 'text') {
+            lines.push('视觉风格：文字优先——不要求配图（视觉节奏规则降为提示）；蓝图 visual 尽量 none，版面以文字版型为主。')
           }
           const materials = Array.isArray(v.referenceMaterials) ? v.referenceMaterials : []
           if (materials.length > 0) {
@@ -195,6 +218,10 @@ export function createBriefTools(config: ResolvedPptStudioConfig): ToolDefinitio
         })()
         const theme = getTheme(args.themeId)
         if (theme === undefined) throw new Error(`未知主题 ${args.themeId}，可选：${THEMES.map(t => t.id).join(' / ')}`)
+        const modelProfile = args.modelProfile ?? 'weak'
+        // 0.14.0：strong 档未显式指定 mode 时默认 quick（强模型长输出可靠、逐阶段闸门的
+        // 摩擦大于收益）；用户/上层显式给了 mode 或 confirmStages 则照旧优先。
+        const defaultMode = modelProfile === 'strong' ? 'quick' : 'standard'
 
         const { store } = resolveToolContext(config, exec)
         const created = await store.create(args.title)
@@ -209,21 +236,23 @@ export function createBriefTools(config: ResolvedPptStudioConfig): ToolDefinitio
           themeId: args.themeId,
           tone: args.tone,
           density: args.density ?? 'normal',
-          mode: args.mode ?? 'standard',
+          mode: args.mode ?? defaultMode,
+          modelProfile,
           renderRoute: args.renderRoute ?? 'native',
+          visualStyle: args.visualStyle ?? 'balanced',
           evidenceLevel: args.evidenceLevel ?? 'none',
           strictness: args.strictness ?? 'normal',
           ...(args.referenceMaterials !== undefined ? { referenceMaterials: args.referenceMaterials } : {}),
           // 0.9.0 收敛：mode 只是确认点的预设——唯一开关是 confirmStages。
           // quick=不逐阶段确认（打包一次）；standard=五阶段逐项；precise=standard+Prototype。
-          // 用户显式给 confirmStages 时优先于 mode 预设。
-          confirmStages: args.confirmStages ?? confirmStagesPreset(args.mode ?? 'standard'),
+          // 用户显式给 confirmStages 时优先于 mode 预设（0.14.0：strong 档默认 quick）。
+          confirmStages: args.confirmStages ?? confirmStagesPreset(args.mode ?? defaultMode),
           paletteOverrides: args.paletteOverrides,
           confirmedAt: new Date().toISOString(),
         })
         await store.saveJson(created.paths.brief, brief)
         const logger = createDeckLogger(created.paths.root, created.deckId)
-        logger.info('brief', '简报已创建', { themeId: brief.themeId, audience: brief.audience, objective: brief.objective, mode: brief.mode, evidenceLevel: brief.evidenceLevel })
+        logger.info('brief', '简报已创建', { themeId: brief.themeId, audience: brief.audience, objective: brief.objective, mode: brief.mode, modelProfile: brief.modelProfile, evidenceLevel: brief.evidenceLevel })
         return {
           deckId: created.deckId,
           brief,

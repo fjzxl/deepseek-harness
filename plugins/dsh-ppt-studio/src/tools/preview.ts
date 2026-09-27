@@ -65,7 +65,7 @@ export function createPreviewTools(config: ResolvedPptStudioConfig): ToolDefinit
         }
 
         const logger = createDeckLogger(store.paths(args.deckId).root, args.deckId)
-        const theme = { colors: tokens.colors, chartColors: tokens.chartColors, fonts: tokens.fonts }
+        const theme = { colors: tokens.colors, chartColors: tokens.chartColors, fonts: tokens.fonts, ...(tokens.texture !== undefined ? { texture: tokens.texture } : {}), ...(tokens.structuralGradient !== undefined ? { structuralGradient: tokens.structuralGradient } : {}) }
         const htmlResult = await logger.timed('preview', '即时预览刷新', () =>
           renderDeckHtml({ store, deckId: args.deckId, deckTitle: state.title, theme, pages, progress }),
         )

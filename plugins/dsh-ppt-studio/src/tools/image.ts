@@ -2,8 +2,9 @@
  * ppt_asset_register —— 登记本地图片；ppt_image_generate —— 内网生图接口（预留）。
  */
 import { z } from 'zod'
-import { registerAsset } from '../assets.js'
+import { registerAsset, readAssetBuffer } from '../assets.js'
 import { generateImage, imageApiReady } from '../image-provider.js'
+import { extractDominantColors, suggestPaletteOverrides } from '../color-extract.js'
 import { requireDeckState } from '../deck-store.js'
 import { createDeckLogger } from '../logger.js'
 import type { ResolvedPptStudioConfig } from '../config.js'
@@ -16,7 +17,8 @@ export function createImageTools(config: ResolvedPptStudioConfig): ToolDefinitio
       description:
         '登记一张本地图片供页面引用：校验格式（png/jpg/gif/webp/svg/bmp，≤15MB）、解析尺寸、计算 sha256、' +
         '冻结到 deck 的 assets/images/ 并写入 manifest。页面 image 元素的 assetId 必须来自本工具或 ppt_image_generate。' +
-        '中文：登记本地图片资产。',
+        '品牌图（logo/VI 参考）登记时自动提取 ≤3 个主色并派生 paletteOverrides 建议（paletteSuggestion，0.18.0）——' +
+        '品牌化路径：登记品牌图 → 用户认可建议色 → ppt_design_lock 的 paletteOverrides 带入。中文：登记本地图片资产（品牌图附取色建议）。',
       parameters: {
         type: 'object',
         properties: {
@@ -29,7 +31,19 @@ export function createImageTools(config: ResolvedPptStudioConfig): ToolDefinitio
         schema: { type: 'object', properties: { assetId: { type: 'string' }, width: { type: 'integer' }, height: { type: 'integer' } }, additionalProperties: true },
         render: (_args, value) => {
           const v = asRecord(value)
-          return oneText(`✅ 图片已登记：assetId=${String(v.assetId)}（${String(v.width ?? '?')}×${String(v.height ?? '?')}px，${String(v.mime)}）。页面 image 元素引用该 assetId 即可。`)
+          const lines: string[] = [
+            `✅ 图片已登记：assetId=${String(v.assetId)}（${String(v.width ?? '?')}×${String(v.height ?? '?')}px，${String(v.mime)}）。页面 image 元素引用该 assetId 即可。`,
+          ]
+          const suggestion = asRecord(v.paletteSuggestion)
+          const brandColors = Array.isArray(v.brandColors) ? v.brandColors.map(c => String(c)) : []
+          if (suggestion !== undefined && suggestion.primary !== undefined) {
+            lines.push(`🎨 品牌主色：${brandColors.join(' / ')}`)
+            lines.push(`   派生色板建议（ppt_design_lock 的 paletteOverrides）：primary ${String(suggestion.primary)} / secondary ${String(suggestion.secondary)} / accent ${String(suggestion.accent)}。`)
+            lines.push('   展示给用户：认可即带此 paletteOverrides 锁定设计，不认可可让用户改色或沿用主题原色。')
+          } else if (v.colorNote !== undefined) {
+            lines.push(`🎨 未提取品牌色：${String(v.colorNote)}`)
+          }
+          return oneText(lines.join('\n'))
         },
       },
       execute: async (rawArgs, exec) => {
@@ -40,7 +54,28 @@ export function createImageTools(config: ResolvedPptStudioConfig): ToolDefinitio
         const { assetId, entry } = await registerAsset(store, args.deckId, args.path, workspaceRoot)
         const logger = createDeckLogger(store.paths(args.deckId).root, args.deckId)
         logger.info('asset', `图片已登记 ${assetId}`, { file: entry.file, sha256: entry.sha256.slice(0, 12), bytes: entry.bytes })
-        return { assetId, mime: entry.mime, width: entry.width, height: entry.height, bytes: entry.bytes, sha256: entry.sha256.slice(0, 16) }
+
+        // 品牌图取色（0.18.0，roadmap P5）：纯本地零依赖提取主色 → 派生 paletteOverrides 建议。
+        // 只建议不代用：是否品牌化由用户在 design_lock 时表态。
+        const frozen = await readAssetBuffer(store, args.deckId, assetId)
+        const extracted = frozen !== undefined ? extractDominantColors(frozen.buffer, entry.mime) : undefined
+        const suggestion = extracted !== undefined && extracted.colors.length > 0 ? suggestPaletteOverrides(extracted.colors) : undefined
+        if (extracted !== undefined && extracted.colors.length > 0) {
+          logger.info('asset', '品牌主色已提取', { colors: extracted.colors })
+        }
+        return {
+          assetId,
+          mime: entry.mime,
+          width: entry.width,
+          height: entry.height,
+          bytes: entry.bytes,
+          sha256: entry.sha256.slice(0, 16),
+          ...(extracted !== undefined && extracted.colors.length > 0
+            ? { brandColors: extracted.colors, paletteSuggestion: suggestion }
+            : extracted?.note !== undefined
+              ? { colorNote: extracted.note }
+              : {}),
+        }
       },
     },
     {

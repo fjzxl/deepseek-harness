@@ -18,10 +18,31 @@ import { z } from 'zod'
 import { CANVAS_W_IN } from './units.js'
 import { estimateTextCapacity } from './validate.js'
 import { normalizeSvgRoot, sanitizeSvg } from './normalize.js'
+import { relativeLuminance, structuralGradient, structuralTextColor } from './themes.js'
+import { renderIllustration } from './illustration.js'
+import { isIconName, pickIconForText, renderIconSvg } from './icons.js'
 import type { ChartType, DesignTokens, PageScene, PageType, SceneElement, TextElement } from './schema.js'
 import { CHART_TYPES, PAGE_TYPES } from './schema.js'
 
 // ---------------------------------------------------------------- 内容输入
+
+/**
+ * 版式意图声明（0.17.0，content 2.0）：模型做构图选择题，代码执行坐标。
+ * 受限词表（非自由文本）——未知 variant 回落默认并记 layoutNote；split 越界由 zod 拦。
+ * 适用页型：image-text(variant/split) | two-col/comparison(split/divider/card) |
+ * process(variant) | cards(variant/card) | timeline(variant)。
+ */
+export const layoutInputSchema = z.object({
+  /** 页型变体：image-text=image-left|image-right|image-top；process=flow|steps；cards=grid|row；timeline=vertical|horizontal */
+  variant: z.string().min(1).max(30).optional(),
+  /** 图区/左栏宽度占比（30-70，百分比）。image-text 默认 45，two-col/comparison 默认 50 */
+  split: z.number().min(30).max(70).optional(),
+  /** 两栏分隔：none | vs（comparison 默认）| line（细线） */
+  divider: z.enum(['none', 'vs', 'line']).optional(),
+  /** 卡片底色：tint（色阶浅底）| solid（表面色，默认）| plain（无底色纯排版） */
+  card: z.enum(['tint', 'solid', 'plain']).optional(),
+})
+export type LayoutInput = z.infer<typeof layoutInputSchema>
 
 /**
  * 弱模型友好的扁平内容 schema：字段全部可选（按页型取用），title 缺省回落大纲标题。
@@ -40,8 +61,8 @@ export const contentInputSchema = z.object({
     .length(2)
     .optional(),
   steps: z.array(z.object({ name: z.string().min(1).max(40), desc: z.string().max(160).optional() })).min(2).max(6).optional(),
-  events: z.array(z.object({ label: z.string().min(1).max(24), desc: z.string().min(1).max(160) })).min(2).max(6).optional(),
-  cards: z.array(z.object({ title: z.string().min(1).max(60), desc: z.string().max(200).optional() })).min(2).max(4).optional(),
+  events: z.array(z.object({ label: z.string().min(1).max(24), desc: z.string().min(1).max(160), icon: z.string().max(30).optional() })).min(2).max(6).optional(),
+  cards: z.array(z.object({ title: z.string().min(1).max(60), desc: z.string().max(200).optional(), icon: z.string().max(30).optional() })).min(2).max(4).optional(),
   bigNumber: z.object({
     value: z.string().min(1).max(12),
     unit: z.string().max(8).optional(),
@@ -66,16 +87,62 @@ export const contentInputSchema = z.object({
     prompt: z.string().max(120).optional(),
     /** 模型生成的矢量插图（0.13.0）：无生图接口时的配图路径，引擎清洗 + 按 viewBox 比例适配区域 */
     svg: z.string().min(20).max(300_000).optional(),
+    /**
+     * 图示 JSON（0.17.0，优先于 svg；0.20.0 扩 venn/matrix/tree；0.22.x 扩 pyramid/funnel/cycle）：
+     * 只描述"什么图、哪些节点"，代码用锁定令牌渲染——消灭手写 SVG 标签笔误
+     * （真实事故：`</svg viewBox=…>` 解析失败），颜色天然守锁、风格统一。
+     * kind 语义：flow 顺序流程（2-6 节点）| layers 层级堆叠（2-6）| venn 集合交集（2-3）|
+     * matrix 2×2 四象限（恰好 4，左上→右下）| tree 根+单层子树（2-6，nodes[0] 为根）|
+     * pyramid 金字塔（3-5，nodes[0]=顶层）| funnel 漏斗（3-6，上宽下窄）| cycle 循环（2-6，标签 ≤8 字）。
+     */
+    illustration: z.object({
+      kind: z.enum(['flow', 'layers', 'venn', 'matrix', 'tree', 'pyramid', 'funnel', 'cycle']),
+      title: z.string().max(60).optional(),
+      nodes: z.array(z.object({
+        label: z.string().min(1).max(24),
+        sub: z.string().max(40).optional(),
+      })).min(2).max(6),
+    }).optional(),
     heading: z.string().max(60).optional(),
     items: z.array(z.string().max(120)).max(5).optional(),
   }).optional(),
   layers: z.array(z.string().min(1).max(40)).min(2).max(4).optional(),
   entries: z.array(z.string().min(1).max(60)).min(2).max(8).optional(),
+  /** icon-list 显式图标名（0.18.0；与 items 平行，缺省按条目文本关键词自动选） */
+  icons: z.array(z.string().min(1).max(30)).max(8).optional(),
+  /** 版式意图（0.17.0）：受限词表，代码执行坐标——见 layoutInputSchema */
+  layout: layoutInputSchema.optional(),
   notes: z.string().max(2000).optional(),
 })
 export type PageContentInput = z.infer<typeof contentInputSchema>
 
 /** 引擎无法从 content 推断时的回落信息（来自整册大纲的蓝图页）。 */
+/** 两个 hex 的 RGB 欧氏距离（0-441；DECORATION_CONTRAST 的色距判据同口径）。 */
+function hexDistance(a: string, b: string): number {
+  const ch = (h: string, i: number): number => parseInt(h.slice(i, i + 2), 16)
+  return Math.sqrt((ch(a, 1) - ch(b, 1)) ** 2 + (ch(a, 3) - ch(b, 3)) ** 2 + (ch(a, 5) - ch(b, 5)) ** 2)
+}
+
+/** 徽章圆片色（浅色底自适应）：优先 tint200（字形对比最佳），低饱和暖色主题可能
+ *  低于装饰可见线（warm-sunset 实测 73<75）——逐档加深至色距 ≥75，全落空回退基色。 */
+function badgeCircleFill(tokens: DesignTokens): string {
+  const tints = tokens.tints
+  if (tints === undefined) return tokens.colors.primary
+  if (relativeLuminance(tokens.colors.bg) <= 0.4) return tints.primary['600']
+  for (const step of ['200', '300', '400'] as const) {
+    if (hexDistance(tints.primary[step], tokens.colors.bg) >= 75) return tints.primary[step]
+  }
+  return tokens.colors.primary
+}
+
+/** 徽章字形色：与圆片色配对保证可见（浅=tint700 深字压浅圆，深=bg 深字压亮圆，无色阶=onPrimary）。 */
+function badgeGlyphColor(tokens: DesignTokens, circleFill: string): string {
+  if (tokens.tints === undefined) return tokens.colors.onPrimary
+  return circleFill === tokens.colors.primary
+    ? tokens.colors.onPrimary
+    : relativeLuminance(tokens.colors.bg) > 0.4 ? tokens.tints.primary['700'] : tokens.colors.bg
+}
+
 export interface ComposeFallback {
   type: PageType
   title: string
@@ -128,13 +195,13 @@ const TYPE_REQUIREMENTS: Record<PageType, string> = {
   chart: 'chart: {chartType:"column",labels:["A","B"],series:[{name:"系列",values:[1,2]}],conclusion:"结论"}',
   table: 'table: {header:["列1","列2"],rows:[["a","b"]],note:"来源（可选）"}',
   quote: 'quote: {text:"引文",source:"出处（可选）"}',
-  timeline: 'events: [{label:"2019",desc:"事件"},…]',
+  timeline: 'events: [{label:"2019",desc:"事件",icon?:"rocket"}]（icon 可选：图标词表见 SKILL.md；缺省按文本自动选）',
   comparison: 'columns: [{title:"旧",items:["…"]},{title:"新",items:["…"]}]',
   'big-number': 'bigNumber: {value:"5",unit:"倍",desc:"一句话含义",source:"来源（可选）"}',
   process: 'steps: [{name:"步骤名",desc:"说明"},…]',
-  cards: 'cards: [{title:"卡题",desc:"说明"},…]',
+  cards: 'cards: [{title:"卡题",desc:"说明",icon?:"target"}]（icon 可选：图标词表见 SKILL.md）',
   hierarchy: 'layers: ["顶层","中层","底层"]',
-  'icon-list': 'items: ["要点短句一","要点短句二"]',
+  'icon-list': 'items: ["要点短句一","要点短句二"]，可选 icons: ["rocket","shield"]（与 items 平行；缺省按条目文本自动选图标）',
 }
 
 class Composer {
@@ -152,6 +219,66 @@ class Composer {
   /** 引擎正文下限：12pt（FONT_TOO_SMALL error 线是 10pt，留缓冲；注释类 11pt）。 */
   private get bodyFont(): number { return Math.max(14, Math.min(this.L.body, 18)) }
   private get noteFont(): number { return Math.max(11, this.L.note) }
+
+  /**
+   * 色阶取色（0.15.0）：卡片底/描边/浅强调用 tint，避免只能用基色或灰。
+   * 旧 deck 的 tokens.json 无 tints 时回落基色（不产生新 warning，只是少了层次）。
+   */
+  private tint(role: 'primary' | 'secondary' | 'accent', step: '50' | '100' | '200' | '300' | '400' | '600' | '700' | '800' | '900'): string {
+    return this.tokens.tints?.[role][step] ?? this.C[role]
+  }
+
+  /**
+   * 明暗感知的「可见色阶」（放在页面底色上的小装饰用）：浅色页取浅档（300，
+   * 混入 52% 基色，12 套主题对底色色距均 ≥75）、深色页取深档（600，向白锚靠拢）。
+   * 单一档位无法同时服务深浅主题（浅档在深底上更不可见），按底色亮度分流。
+   */
+  private tintVisible(role: 'primary' | 'secondary' | 'accent'): string {
+    return relativeLuminance(this.C.bg) > 0.4 ? this.tint(role, '300') : this.tint(role, '600')
+  }
+
+  /** 卡片统一细描边（0.15.0 层次三件套：surface 卡在近底色页面上靠描边+阴影立住）。 */
+  private cardBorder(): { color: string; width: number; style: 'solid' } {
+    return { color: this.tint('primary', '200'), width: 1, style: 'solid' }
+  }
+
+  /** 卡片统一轻阴影（双渲染器一致：PPTX outer shadow / HTML box-shadow）。 */
+  private cardShadow(): { opacity: number; blur: number; angle: number; offset: number } {
+    return { opacity: 0.16, blur: 7, angle: 90, offset: 2 }
+  }
+
+  /** 图标名解析：显式给且在词表 → 用之；否则按文本关键词确定性自动选（未知名记 note）。 */
+  private resolveIcon(explicit: string | undefined, text: string): string {
+    if (explicit !== undefined && explicit !== '') {
+      if (isIconName(explicit)) return explicit
+      this.notes.push(`图标名 "${explicit}" 不在图标词表（完整词表见 SKILL.md），已按条目文本自动选择图标`)
+    }
+    return pickIconForText(text)
+  }
+
+  /**
+   * 图标徽章（0.18.0 T2-1）：色阶圆片 + 内联 SVG 线稿图标。
+   * 配色自适应（视觉评估两轮结论）：浅色底圆片取"能过装饰可见线的最浅色阶"
+   * （tint200 起逐档加深，warm-sunset 这类低饱和主色会落到 300）+ tint700 深字形；
+   * 深色底 tint600 亮圆 + bg 深字形；旧 deck 无色阶回退 primary 圆 + onPrimary。
+   * 图标走 image.svg 既有链路（HTML 内联 + PPTX 光栅化 PNG）。
+   */
+  iconBadge(cx: number, cy: number, size: number, icon: string): void {
+    const circleFill = badgeCircleFill(this.tokens)
+    const glyphColor = badgeGlyphColor(this.tokens, circleFill)
+    this.shape({
+      x: r2(cx - size / 2), y: r2(cy - size / 2), w: r2(size), h: r2(size),
+      shape: 'ellipse', fill: circleFill, background: true, idPrefix: 'icbg',
+    })
+    const inner = r2(size * 0.62)
+    this.push({
+      kind: 'image',
+      id: this.ids.next('icgl'),
+      x: r2(cx - inner / 2), y: r2(cy - inner / 2), w: inner, h: inner,
+      svg: renderIconSvg(icon, glyphColor),
+      fit: 'contain',
+    })
+  }
 
   push(el: SceneElement): void { this.elements.push(el) }
 
@@ -196,6 +323,7 @@ class Composer {
     background?: boolean
     opacity?: number
     border?: Extract<SceneElement, { kind: 'shape' }>['border']
+    shadow?: Extract<SceneElement, { kind: 'shape' }>['shadow']
     radius?: number
     idPrefix: string
   }): void {
@@ -207,6 +335,7 @@ class Composer {
       fill: props.fill,
       opacity: props.opacity,
       border: props.border,
+      shadow: props.shadow,
       radius: props.radius,
       background: props.background,
     })
@@ -222,7 +351,10 @@ class Composer {
     }
   }
 
-  /** 内容页标准标题带：标题 + 主色短横条（锚点取锁定令牌）。 */
+  /** 内容页标准标题带：标题 + 点缀色短横条（锚点取锁定令牌）。
+   * 0.19.0 短横条由 primary 改 accent：accent 原本只在图表/章序号露出，工业灰橙类主题
+   * （primary=石墨灰）整个内容页无主题点缀色，被判"像未套色的默认灰主题"；
+   * 12 主题 accent 对各自 bg 均过装饰可见性双指标（DECORATION_CONTRAST 零误报单测覆盖）。 */
   titleBand(title: string): void {
     this.text({
       x: this.A.titleX, y: this.A.titleY, w: this.A.titleW, h: 0.7,
@@ -232,7 +364,7 @@ class Composer {
     })
     this.shape({
       x: this.A.titleX, y: r2(this.A.titleY + 0.8), w: this.A.titleBarW, h: this.A.titleBarH,
-      shape: 'rect', fill: this.C.primary, background: true, idPrefix: 'bar-title',
+      shape: 'rect', fill: this.C.accent, background: true, idPrefix: 'bar-title',
     })
   }
 
@@ -274,89 +406,169 @@ class Composer {
     })
   }
 
-  iconList(items: string[]): void {
+  iconList(items: string[], icons?: string[], layout: LayoutInput = {}): void {
     const n = items.length
-    // 0.12.0：步距上限 0.85→1.05，条目少时整块垂直居中（不再全部堆在 1.8 起的顶部）
-    const step = Math.min(1.05, 4.8 / n)
-    const y0 = r2(1.7 + Math.max(0, 4.8 - n * step) / 2)
+    const cardKind = layout.card ?? 'solid'
+    // 0.20.0（T3-5）：整宽行卡取代"徽章 + 左置单列文本"——旧版右半幅 ~55% 空置、
+    // 视觉重心偏左（0.19.0 视觉门对 12 主题样张的共同判决）。行卡铺满内容宽，
+    // 条目少时整块垂直居中（沿用 0.12.0 稀疏自适应思想）。plain 变体保持纯排版。
+    const top = 1.7
+    const bottom = 6.7
+    const gap = n > 6 ? 0.12 : 0.18
+    const rowH = r2(Math.min(1.0, (bottom - top - (n - 1) * gap) / n))
+    const total = r2(n * rowH + (n - 1) * gap)
+    const y0 = r2(top + Math.max(0, (bottom - top - total) / 2))
+    if (total < 4.6) this.notes.push(`条目较少：${String(n)} 行卡垂直居中（不再堆顶）`)
+    const badge = Math.min(0.5, r2(rowH - 0.14))
+    const style = cardKind === 'plain' ? undefined : this.cardStyle(cardKind)
     items.forEach((item, i) => {
-      const y = y0 + i * step
-      this.shape({
-        x: 0.9, y: r2(y + 0.05), w: 0.5, h: 0.5,
-        shape: 'ellipse', fill: this.C.primary, opacity: 0.15, background: true, idPrefix: 'ic',
-      })
+      const y = r2(y0 + i * (rowH + gap))
+      if (style !== undefined) {
+        this.shape({
+          x: 0.6, y, w: 12.13, h: rowH,
+          shape: 'roundRect', fill: style.fill, background: true, radius: 8, idPrefix: 'rowcard',
+          border: style.border, shadow: style.shadow,
+        })
+      }
+      // 0.18.0 T2-1：内置 SVG 图标取代纯序号数字（icon-list 页型名不副实的根治）
+      this.iconBadge(r2(0.6 + 0.24 + badge / 2), r2(y + rowH / 2), badge, this.resolveIcon(icons?.[i], item))
       this.text({
-        x: 0.9, y: r2(y + 0.1), w: 0.5, h: 0.4,
-        fontSize: 14, color: this.C.accent, bold: true, align: 'center', valign: 'mid',
-        paragraphs: [{ text: String(i + 1).padStart(2, '0') }],
-        idPrefix: 'icn', fit: false,
-      })
-      this.text({
-        x: 1.7, y: r2(y), w: 10.9, h: 0.6,
-        fontSize: this.bodyFont, color: this.C.text,
+        x: r2(0.6 + 0.24 + badge + 0.22), y, w: r2(12.13 - 0.24 - badge - 0.22 - 0.25), h: rowH,
+        fontSize: this.bodyFont, color: this.C.text, valign: 'mid',
         paragraphs: [{ text: item }],
         idPrefix: 'li',
       })
     })
   }
 
-  twoCards(columns: Array<{ title?: string; items?: string[] }>, opts: { vs?: boolean; height?: number } = {}): void {
+  /** 卡片底色风格（0.17.0 layout.card）：solid=表面色+描边+阴影（默认）；tint=色阶浅底；plain=无底纯排版。 */
+  private cardStyle(kind: 'solid' | 'tint' | 'plain' = 'solid'): { fill: string; border: { color: string; width: number; style: 'solid' } | undefined; shadow: { opacity: number; blur: number; angle: number; offset: number } | undefined } {
+    if (kind === 'plain') return { fill: '', border: undefined, shadow: undefined }
+    if (kind === 'tint') return { fill: this.tint('primary', '50'), border: { color: this.tint('primary', '200'), width: 1, style: 'solid' }, shadow: this.cardShadow() }
+    return { fill: this.C.surface, border: this.cardBorder(), shadow: this.cardShadow() }
+  }
+
+  twoCards(columns: Array<{ title?: string; items?: string[] }>, opts: { vs?: boolean; height?: number; layout?: LayoutInput } = {}): void {
+    const layout = opts.layout ?? {}
+    if (layout.variant !== undefined && layout.variant !== '' && !['equal', 'split'].includes(layout.variant)) {
+      this.notes.push(`layout.variant="${layout.variant}" 不在 two-col/comparison 词表（equal|split），已回落默认等宽`)
+    }
     const h = opts.height ?? 5.0
-    const xs = [0.6, 6.87]
+    // split（0.17.0）：左栏占比 30-70，默认 50；总宽 = 12.13 - 间隙 0.75
+    const leftPct = (layout.split ?? 50) / 100
+    const totalW = 12.13 - 0.75
+    const wL = r2(totalW * leftPct)
+    const wR = r2(totalW - wL)
+    const xL = 0.6
+    const xR = r2(xL + wL + 0.75)
+    const cardKind = layout.card ?? 'solid'
     columns.forEach((col, i) => {
-      const x = xs[i]
-      this.shape({
-        x, y: 1.7, w: 5.86, h,
-        shape: 'roundRect', fill: this.C.surface, background: true, radius: 8, idPrefix: `card${i}`,
-      })
+      const x = i === 0 ? xL : xR
+      const w = i === 0 ? wL : wR
+      if (cardKind !== 'plain') {
+        const style = this.cardStyle(cardKind)
+        this.shape({
+          x, y: 1.7, w, h,
+          shape: 'roundRect', fill: style.fill, background: true, radius: 8, idPrefix: `card${i}`,
+          border: style.border, shadow: style.shadow,
+        })
+      }
       this.text({
-        x: x + 0.25, y: 1.95, w: 5.36, h: 0.5,
+        x: x + 0.25, y: 1.95, w: w - 0.5, h: 0.5,
         fontSize: 18, color: opts.vs ? (i === 0 ? this.C.textMuted : this.C.primary) : this.C.text, bold: true,
         paragraphs: [{ text: col.title ?? (i === 0 ? '方面一' : '方面二') }],
         idPrefix: `cth${i}`, fit: false,
       })
       this.text({
-        x: x + 0.25, y: 2.55, w: 5.36, h: r2(h - 1.15),
+        x: x + 0.25, y: 2.55, w: w - 0.5, h: r2(h - 1.15),
         fontSize: this.bodyFont, color: this.C.text,
         paragraphs: (col.items ?? []).map(t => ({ text: t, bullet: true, spaceAfter: 8, lineSpacing: 1.3 })),
         idPrefix: `cti${i}`,
       })
     })
-    if (opts.vs) {
+    // divider（0.17.0）：vs 徽章（comparison 默认）| line 细线 | none
+    const divider = layout.divider ?? (opts.vs ? 'vs' : 'none')
+    if (divider === 'vs') {
+      const dx = r2(xL + wL + 0.75 / 2 - 0.35)
       this.shape({
-        x: 6.32, y: r2(1.7 + (h - 0.7) / 2), w: 0.7, h: 0.7,
+        x: dx, y: r2(1.7 + (h - 0.7) / 2), w: 0.7, h: 0.7,
         shape: 'ellipse', fill: this.C.primary, background: true, idPrefix: 'vs',
       })
       this.text({
-        x: 6.32, y: r2(1.7 + (h - 0.7) / 2 + 0.18), w: 0.7, h: 0.34,
+        x: dx, y: r2(1.7 + (h - 0.7) / 2 + 0.18), w: 0.7, h: 0.34,
         fontSize: 14, color: this.C.onPrimary, bold: true, align: 'center', valign: 'mid',
         paragraphs: [{ text: 'VS' }],
         idPrefix: 'vst', fit: false,
       })
+    } else if (divider === 'line') {
+      this.shape({
+        x: r2(xL + wL + 0.375 - 0.01), y: 2.0, w: 0.02, h: r2(h - 0.6),
+        shape: 'rect', fill: this.tint('primary', '200'), background: true, idPrefix: 'divline',
+      })
     }
   }
 
-  process(steps: Array<{ name: string; desc?: string }>): void {
+  process(steps: Array<{ name: string; desc?: string }>, layout: LayoutInput = {}): void {
     const n = steps.length
+    // steps 变体（0.17.0）：竖排编号行——步骤多/名称长时比横向 chevron 容量大
+    if (layout.variant === 'steps') {
+      const step = Math.min(1.15, 4.8 / n)
+      steps.forEach((stepItem, i) => {
+        const y = r2(1.75 + i * step)
+        this.shape({
+          x: 0.9, y: r2(y + 0.03), w: 0.5, h: 0.5,
+          shape: 'ellipse', fill: this.tintVisible('primary'), background: true, idPrefix: 'stc',
+        })
+        this.text({
+          x: 0.9, y: r2(y + 0.08), w: 0.5, h: 0.4,
+          fontSize: 14, color: this.C.primary, bold: true, align: 'center', valign: 'mid',
+          paragraphs: [{ text: String(i + 1) }],
+          idPrefix: 'stcn', fit: false,
+        })
+        this.text({
+          x: 1.65, y, w: 3.4, h: 0.56,
+          fontSize: 16, color: this.C.text, bold: true, valign: 'mid',
+          paragraphs: [{ text: stepItem.name }],
+          idPrefix: 'stn', floor: 13,
+        })
+        if (stepItem.desc !== undefined && stepItem.desc !== '') {
+          this.text({
+            x: 5.25, y, w: 7.35, h: r2(Math.max(0.56, step - 0.1)),
+            fontSize: 14, color: this.C.textMuted,
+            paragraphs: [{ text: stepItem.desc, lineSpacing: 1.25 }],
+            idPrefix: 'std', floor: 11,
+          })
+        }
+      })
+      return
+    }
+    if (layout.variant !== undefined && layout.variant !== '' && layout.variant !== 'flow') {
+      this.notes.push(`layout.variant="${layout.variant}" 不在 process 词表（flow|steps），已回落默认横向流程`)
+    }
     const gap = 0.25
     // 0.12.0：满宽排布（旧实现钳了 2.7 上限，3 步只铺 8.6/12.13，右侧空三成——真实 deck d20260921-182914 p018）
     const stepW = r2((12.13 - (n - 1) * gap) / n)
+    // 0.17.3：chevron 燕尾凹口/箭头尖各占约高的一半——文字框必须内缩，否则首尾字
+    // 落在形状外的底色上"看不见"（真实 deck d20260923-001312 p019 四卡首字全被凹口切入）；
+    // 卡同步加高一档给两行标题留空间，说明文字下移避开
+    const cardH = 1.3
+    const inset = r2(Math.min(0.6, cardH / 2))
     steps.forEach((step, i) => {
       const x = r2(0.6 + i * (stepW + gap))
       const fill = i === 0 || i === n - 1 ? this.C.primary : this.C.secondary
       this.shape({
-        x, y: 2.6, w: stepW, h: 1.1,
+        x, y: 2.6, w: stepW, h: cardH,
         shape: 'chevron', fill, background: true, idPrefix: 'st',
       })
       this.text({
-        x, y: 2.75, w: stepW, h: 0.8,
+        x: r2(x + inset), y: 2.75, w: r2(stepW - inset * 2), h: 1.0,
         fontSize: 16, color: this.C.onPrimary, bold: true, align: 'center', valign: 'mid',
         paragraphs: [{ text: step.name }],
         idPrefix: 'stn', floor: 12,
       })
       if (step.desc !== undefined && step.desc !== '') {
         this.text({
-          x, y: 3.95, w: stepW, h: 1.8,
+          x, y: 4.15, w: stepW, h: 1.8,
           fontSize: 14, color: this.C.text,
           paragraphs: [{ text: step.desc, lineSpacing: 1.25 }],
           idPrefix: 'std', floor: 11,
@@ -365,18 +577,45 @@ class Composer {
     })
   }
 
-  timeline(events: Array<{ label: string; desc: string }>): void {
+  timeline(events: Array<{ label: string; desc: string; icon?: string }>, layout: LayoutInput = {}): void {
     const n = events.length
+    // horizontal 变体（0.17.0）：横轴时间线——事件按时间从左到右，标签在上/说明在下
+    if (layout.variant === 'horizontal') {
+      const slotW = 11.5 / n
+      const axisY = 3.15
+      this.shape({
+        x: 0.9, y: axisY, w: 11.5, h: 0.05,
+        shape: 'rect', fill: this.C.secondary, background: true, idPrefix: 'axis',
+      })
+      events.forEach((event, i) => {
+        const cx = r2(0.9 + slotW * i + slotW / 2)
+        // 0.18.0 T2-1：轴点升级为图标徽章（事件题旨可辨，不再只是抽象圆点）
+        this.iconBadge(cx, r2(axisY + 0.025), 0.46, this.resolveIcon(event.icon, `${event.label} ${event.desc}`))
+        this.text({
+          x: r2(cx - slotW / 2 + 0.1), y: 2.15, w: r2(slotW - 0.2), h: 0.6,
+          fontSize: 16, color: this.C.primary, bold: true, align: 'center', valign: 'bottom',
+          paragraphs: [{ text: event.label }],
+          idPrefix: 'ndl', floor: 12,
+        })
+        this.text({
+          x: r2(cx - slotW / 2 + 0.1), y: r2(axisY + 0.4), w: r2(slotW - 0.2), h: 2.6,
+          fontSize: 14, color: this.C.text, align: 'center',
+          paragraphs: [{ text: event.desc, lineSpacing: 1.25 }],
+          idPrefix: 'ndd', floor: 11,
+        })
+      })
+      return
+    }
+    if (layout.variant !== undefined && layout.variant !== '' && layout.variant !== 'vertical') {
+      this.notes.push(`layout.variant="${layout.variant}" 不在 timeline 词表（vertical|horizontal），已回落默认竖轴`)
+    }
     this.shape({
       x: 5.0, y: 1.7, w: 0.06, h: 5.0,
       shape: 'rect', fill: this.C.secondary, background: true, idPrefix: 'axis',
     })
     events.forEach((event, i) => {
       const y = 1.9 + (i + 0.5) * (4.8 / n)
-      this.shape({
-        x: 4.9, y: r2(y - 0.12), w: 0.24, h: 0.24,
-        shape: 'ellipse', fill: this.C.primary, idPrefix: 'nd',
-      })
+      this.iconBadge(5.03, r2(y), 0.46, this.resolveIcon(event.icon, `${event.label} ${event.desc}`))
       this.text({
         x: 2.5, y: r2(y - 0.2), w: 2.3, h: 0.4,
         fontSize: 16, color: this.C.primary, bold: true, align: 'right', valign: 'mid',
@@ -392,8 +631,44 @@ class Composer {
     })
   }
 
-  cards(items: Array<{ title?: string; desc?: string }>): void {
+  cards(items: Array<{ title?: string; desc?: string; icon?: string }>, layout: LayoutInput = {}): void {
     const n = items.length
+    const cardKind = layout.card ?? 'solid'
+    // row 变体（0.17.0）：整宽横条卡片堆叠——desc 长时比多列网格每卡更宽
+    if (layout.variant === 'row') {
+      const step = Math.min(1.55, 4.7 / n)
+      items.forEach((card, i) => {
+        const y = r2(1.75 + i * step)
+        if (cardKind !== 'plain') {
+          const style = this.cardStyle(cardKind)
+          this.shape({
+            x: 0.6, y, w: 12.13, h: r2(step - 0.15),
+            shape: 'roundRect', fill: style.fill, background: true, radius: 8, idPrefix: 'card',
+            border: style.border, shadow: style.shadow,
+          })
+        }
+        // 0.18.0：行卡图标徽章（标题左侧）
+        this.iconBadge(1.06, r2(y + (step - 0.15) / 2), 0.38, this.resolveIcon(card.icon, `${card.title ?? ''} ${card.desc ?? ''}`))
+        this.text({
+          x: 1.42, y: r2(y + 0.08), w: 2.7, h: r2(step - 0.31),
+          fontSize: 17, color: this.C.text, bold: true, valign: 'mid',
+          paragraphs: [{ text: card.title ?? `卡片 ${i + 1}` }],
+          idPrefix: 'ctt', floor: 14,
+        })
+        if (card.desc !== undefined && card.desc !== '') {
+          this.text({
+            x: 4.15, y: r2(y + 0.08), w: 8.3, h: r2(step - 0.31),
+            fontSize: 14, color: this.C.textMuted, valign: 'mid',
+            paragraphs: [{ text: card.desc, lineSpacing: 1.25 }],
+            idPrefix: 'ctd', floor: 11,
+          })
+        }
+      })
+      return
+    }
+    if (layout.variant !== undefined && layout.variant !== '' && layout.variant !== 'grid') {
+      this.notes.push(`layout.variant="${layout.variant}" 不在 cards 词表（grid|row），已回落默认网格`)
+    }
     const width = n <= 2 ? 5.86 : n === 3 ? 3.9 : 2.9
     const xs = n === 1 ? [0.6]
       : n === 2 ? [0.6, 6.87]
@@ -401,16 +676,16 @@ class Composer {
           : [0.6, 3.78, 6.96, 10.13]
     items.forEach((card, i) => {
       const x = xs[Math.min(i, xs.length - 1)]
-      this.shape({
-        x, y: 1.8, w: width, h: 4.4,
-        shape: 'roundRect', fill: this.C.surface, background: true, radius: 8, idPrefix: 'card',
-      })
-      this.text({
-        x: x + 0.2, y: 2.0, w: width - 0.4, h: 0.5,
-        fontSize: 24, color: this.C.accent, bold: true,
-        paragraphs: [{ text: String(i + 1).padStart(2, '0') }],
-        idPrefix: 'cno', fit: false,
-      })
+      if (cardKind !== 'plain') {
+        const style = this.cardStyle(cardKind)
+        this.shape({
+          x, y: 1.8, w: width, h: 4.4,
+          shape: 'roundRect', fill: style.fill, background: true, radius: 8, idPrefix: 'card',
+          border: style.border, shadow: style.shadow,
+        })
+      }
+      // 0.18.0 T2-1：图标徽章取代纯序号数字（题旨一眼可辨）
+      this.iconBadge(r2(x + 0.42), 2.26, 0.44, this.resolveIcon(card.icon, `${card.title ?? ''} ${card.desc ?? ''}`))
       this.text({
         x: x + 0.2, y: 2.65, w: width - 0.4, h: 0.6,
         fontSize: 17, color: this.C.text, bold: true,
@@ -438,7 +713,7 @@ class Composer {
         x, y, w, h: 0.9,
         shape: 'rect',
         fill: isPlain ? this.C.surface : i === 0 ? this.C.primary : this.C.secondary,
-        border: isPlain ? { color: this.C.primary, width: 1, style: 'solid' } : undefined,
+        border: isPlain ? { color: this.tint('primary', '300'), width: 1, style: 'solid' } : undefined,
         background: true, idPrefix: 'lay',
       })
       this.text({
@@ -575,11 +850,63 @@ class Composer {
     }
   }
 
-  imageText(data: { assetId?: string; prompt?: string; svg?: string; heading?: string; items?: string[] }, fallback: ComposeFallback): void {
-    const region = { x: 0.6, y: 1.7, w: 5.6, h: 4.6 }
+  /**
+  /**
+   * 结构页装饰（0.15.0）：右上浅色阶大圆 + 底部点缀条——渐变主底上的确定性分层。
+   * 条色用结构页文字色（0.19.0：深色锚封面派生白色，其余主题=onPrimary，
+   * 全主题天然过 DECORATION_CONTRAST；accent 在部分主题与主色撞色）。
+   * 旧 deck 无色阶时跳过大圆（回落基色会与主底同色不可见），只保留底条。
+   */
+  structuralDecor(): void {
+    // 深底主题 tint200 向 bg 混色会把金色相混成灰褐（navy-gold 视觉评估实测 #54534D 脏圆），
+    // 深底改取向白锚的 tint600（亮金/亮青），浅底维持 tint200
+    const dark = relativeLuminance(this.tokens.colors.bg) <= 0.4
+    const circle = this.tokens.tints?.primary[dark ? '600' : '200']
+    if (circle !== undefined) {
+      this.shape({
+        x: 10.43, y: -0.3, w: 3.2, h: 3.2,
+        shape: 'ellipse', fill: circle, background: true, idPrefix: 'deco',
+      })
+    }
+    this.shape({
+      x: 0, y: 7.1, w: CANVAS_W_IN, h: 0.4,
+      shape: 'rect', fill: structuralTextColor(this.tokens), background: true, idPrefix: 'decobar',
+    })
+  }
+
+  imageText(data: { assetId?: string; prompt?: string; svg?: string; illustration?: { kind: 'flow' | 'layers' | 'venn' | 'matrix' | 'tree' | 'pyramid' | 'funnel' | 'cycle'; title?: string; nodes: Array<{ label: string; sub?: string }> }; heading?: string; items?: string[] }, fallback: ComposeFallback, layout: LayoutInput = {}): void {
+    // 图区几何（0.17.0 layout）：variant=image-left（默认）|image-right|image-top；split=图区宽占比（默认 45）
+    const variant = layout.variant ?? 'image-left'
+    if (!['image-left', 'image-right', 'image-top'].includes(variant)) {
+      this.notes.push(`layout.variant="${variant}" 不在 image-text 词表（image-left|image-right|image-top），已回落 image-left`)
+    }
+    const splitPct = layout.split ?? 45
+    let region: { x: number; y: number; w: number; h: number }
+    let textX: number; let textW: number
+    if (variant === 'image-top') {
+      region = { x: 0.6, y: 1.6, w: 12.13, h: 2.9 }
+      textX = 0.6
+      textW = 12.13
+    } else {
+      const imgW = r2(12.13 * (splitPct / 100))
+      const txtW = r2(12.13 - imgW - 0.4)
+      if (variant === 'image-right') {
+        region = { x: r2(0.6 + txtW + 0.4), y: 1.7, w: imgW, h: 4.6 }
+        textX = 0.6
+        textW = txtW
+      } else {
+        region = { x: 0.6, y: 1.7, w: imgW, h: 4.6 }
+        textX = r2(0.6 + imgW + 0.4)
+        textW = txtW
+      }
+    }
+    // 图示 JSON（0.17.0）优先：代码用锁定令牌渲染 SVG，消灭手写标签笔误
+    const svgSource = data.illustration !== undefined
+      ? renderIllustration(data.illustration, this.tokens)
+      : data.svg
     // svg 内联矢量图（0.13.0）：无生图接口时的配图路径——清洗 + 根标签归一 + 按 viewBox 比例适配区域（不拉伸）
-    if (data.svg !== undefined && data.svg !== '') {
-      const normalized = normalizeSvgRoot(sanitizeSvg(data.svg))
+    if (svgSource !== undefined && svgSource !== '') {
+      const normalized = normalizeSvgRoot(sanitizeSvg(svgSource))
       if (normalized !== null) {
         const ratio = normalized.width / normalized.height
         let { x, y, w, h } = region
@@ -597,15 +924,17 @@ class Composer {
           svg: normalized.svg,
           fit: 'contain',
         })
-        this.notes.push('图区使用模型生成的 SVG 矢量插图（已清洗并按 viewBox 比例适配，PPTX 以矢量嵌入、PowerPoint 2016+ 显示）')
+        this.notes.push(data.illustration !== undefined
+          ? `图区使用 illustration 图示 JSON（${data.illustration.kind}，代码按锁定令牌渲染矢量图并按比例适配区域）`
+          : '图区使用模型生成的 SVG 矢量插图（已清洗并按 viewBox 比例适配，PPTX 以矢量嵌入、PowerPoint 2016+ 显示）')
       } else {
-        this.notes.push('image.svg 不是合法的 <svg> 源码（未找到根标签），已降级为占位框——请提供完整 <svg viewBox="…">…</svg>')
+        this.notes.push('image.svg 不是合法的 <svg> 源码（未找到根标签），已降级为占位框——请提供完整 <svg viewBox="…">…</svg>，或改传 image.illustration 图示 JSON')
         this.push({ kind: 'image', id: this.ids.next('img'), ...region, placeholder: { prompt: (data.prompt ?? fallback.contentBrief ?? '建议配图').slice(0, 120) }, fit: 'cover' })
       }
     } else {
       const useAsset = data.assetId !== undefined && (fallback.knownAssetIds?.has(data.assetId) ?? false)
       if (data.assetId !== undefined && !useAsset) {
-        this.notes.push(`assetId ${data.assetId} 未登记（ASSET_MISSING 是 error），已降级为占位框——先 ppt_asset_register / ppt_image_generate，或直接给 image.svg 内联矢量图`)
+        this.notes.push(`assetId ${data.assetId} 未登记（ASSET_MISSING 是 error），已降级为占位框——先 ppt_asset_register / ppt_image_generate，或直接给 image.illustration 图示 JSON / image.svg 内联矢量图`)
       }
       this.push({
         kind: 'image',
@@ -618,8 +947,26 @@ class Composer {
       })
     }
     const heading = data.heading ?? fallback.title
+    if (variant === 'image-top') {
+      this.text({
+        x: textX, y: 4.65, w: textW, h: 0.55,
+        fontSize: 20, color: this.C.text, bold: true,
+        paragraphs: [{ text: heading }],
+        idPrefix: 'ith', floor: 16,
+      })
+      const itemsTop = data.items ?? splitSentences(fallback.contentBrief ?? '', 4)
+      if (itemsTop.length > 0) {
+        this.text({
+          x: textX, y: 5.3, w: textW, h: 1.6,
+          fontSize: this.bodyFont, color: this.C.text,
+          paragraphs: itemsTop.map(t => ({ text: t, bullet: true, spaceAfter: 6, lineSpacing: 1.25 })),
+          idPrefix: 'iti',
+        })
+      }
+      return
+    }
     this.text({
-      x: 6.6, y: 1.8, w: 6.1, h: 0.6,
+      x: textX, y: 1.8, w: textW, h: 0.6,
       fontSize: 20, color: this.C.text, bold: true,
       paragraphs: [{ text: heading }],
       idPrefix: 'ith', floor: 16,
@@ -627,7 +974,7 @@ class Composer {
     const items = data.items ?? splitSentences(fallback.contentBrief ?? '', 4)
     if (items.length > 0) {
       this.text({
-        x: 6.6, y: 2.55, w: 6.1, h: 3.7,
+        x: textX, y: 2.55, w: textW, h: 3.7,
         fontSize: this.bodyFont, color: this.C.text,
         paragraphs: items.map(t => ({ text: t, bullet: true, spaceAfter: 8, lineSpacing: 1.3 })),
         idPrefix: 'iti',
@@ -638,9 +985,14 @@ class Composer {
 
 // ---------------------------------------------------------------- 页型分派
 
-/** 结构页（cover/toc/section/closing）的整页背景。 */
+/**
+ * 结构页（cover/toc/section/closing）的整页背景。
+ * 0.15.0 改纯色主底（当时 PPTX 端渐变回退纯色，双端不一致）；0.19.0 渲染器把该底色
+ * 升级为双色渐变（HTML=CSS、PPTX=光栅化 PNG），scene.background.color 保留渐变起点
+ * 作为回退底 + 装饰对比校验的基准色。深色锚主题端点来自 tokens.structuralGradient。
+ */
 function structuralBackground(tokens: DesignTokens): PageScene['background'] {
-  return { gradient: { from: tokens.colors.primary, to: tokens.colors.secondary, angle: 135 } }
+  return { color: structuralGradient(tokens).from }
 }
 
 export function composeSceneFromContent(rawContent: PageContentInput, fallback: ComposeFallback, tokens: DesignTokens): ComposeResult {
@@ -662,11 +1014,14 @@ export function composeSceneFromContent(rawContent: PageContentInput, fallback: 
   switch (type) {
     case 'cover': {
       background = structuralBackground(tokens)
-      c.text({ x: 1.0, y: 2.6, w: 11.3, h: 1.2, fontSize: tokens.fontSizeLadder.coverTitle, color: tokens.colors.onPrimary, font: tokens.fonts.title, bold: true, align: 'center', valign: 'mid', paragraphs: [{ text: title }], idPrefix: 'covt', fit: false })
+      c.structuralDecor()
+      const sc = structuralTextColor(tokens)
+      // 0.15.0 构图修正：标题组垂直重心居中（旧版偏下、下方留白失衡），标题与副标题间加居中点缀条
+      c.text({ x: 1.0, y: 2.35, w: 11.3, h: 1.2, fontSize: tokens.fontSizeLadder.coverTitle, color: sc, font: tokens.fonts.title, bold: true, align: 'center', valign: 'mid', paragraphs: [{ text: title }], idPrefix: 'covt', fit: false })
+      c.shape({ x: 6.22, y: 3.72, w: 0.9, h: 0.05, shape: 'rect', fill: sc, background: true, idPrefix: 'covrule' })
       if (rawContent.subtitle !== undefined && rawContent.subtitle !== '') {
-        c.text({ x: 1.0, y: 4.0, w: 11.3, h: 0.5, fontSize: 17, color: tokens.colors.onPrimary, align: 'center', paragraphs: [{ text: rawContent.subtitle }], idPrefix: 'covs', floor: 14 })
+        c.text({ x: 1.0, y: 4.05, w: 11.3, h: 0.5, fontSize: 17, color: sc, align: 'center', paragraphs: [{ text: rawContent.subtitle }], idPrefix: 'covs', floor: 14 })
       }
-      c.shape({ x: 0, y: 7.1, w: CANVAS_W_IN, h: 0.4, shape: 'rect', fill: tokens.colors.accent, background: true, idPrefix: 'covbar' })
       break
     }
     case 'toc': {
@@ -684,24 +1039,29 @@ export function composeSceneFromContent(rawContent: PageContentInput, fallback: 
     }
     case 'section': {
       background = structuralBackground(tokens)
+      c.structuralDecor()
+      const sc = structuralTextColor(tokens)
       const seq = rawContent.subtitle !== undefined && /^\d{1,2}$/.test(rawContent.subtitle.trim()) ? rawContent.subtitle.trim() : undefined
       if (seq !== undefined) {
         c.text({ x: 0.9, y: 2.2, w: 3.0, h: 1.0, fontSize: 60, color: tokens.colors.accent, bold: true, paragraphs: [{ text: seq.padStart(2, '0') }], idPrefix: 'seq', fit: false })
       }
-      c.text({ x: 0.9, y: 3.3, w: 11.5, h: 0.9, fontSize: tokens.fontSizeLadder.sectionTitle, color: tokens.colors.onPrimary, font: tokens.fonts.title, bold: true, valign: 'mid', paragraphs: [{ text: title }], idPrefix: 'sect', floor: 20 })
-      const lead = rawContent.items?.[0] ?? rawContent.subtitle
+      c.text({ x: 0.9, y: 3.3, w: 11.5, h: 0.9, fontSize: tokens.fontSizeLadder.sectionTitle, color: sc, font: tokens.fonts.title, bold: true, valign: 'mid', paragraphs: [{ text: title }], idPrefix: 'sect', floor: 20 })
+      c.shape({ x: 0.9, y: 4.35, w: 0.9, h: 0.05, shape: 'rect', fill: sc, background: true, idPrefix: 'secrule' })
+      const lead = rawContent.items?.[0] ?? (seq !== undefined ? undefined : rawContent.subtitle)
       if (lead !== undefined && !/^\d{1,2}$/.test(lead.trim())) {
-        c.text({ x: 0.9, y: 4.4, w: 11.5, h: 0.6, fontSize: 16, color: tokens.colors.onPrimary, paragraphs: [{ text: lead }], idPrefix: 'secl', floor: 13 })
+        c.text({ x: 0.9, y: 4.6, w: 11.5, h: 0.6, fontSize: 16, color: sc, paragraphs: [{ text: lead }], idPrefix: 'secl', floor: 13 })
       }
       break
     }
     case 'closing': {
       background = structuralBackground(tokens)
-      c.text({ x: 1.0, y: 3.0, w: 11.3, h: 1.0, fontSize: Math.max(30, tokens.fontSizeLadder.sectionTitle), color: tokens.colors.onPrimary, font: tokens.fonts.title, bold: true, align: 'center', valign: 'mid', paragraphs: [{ text: title === '' ? '谢谢聆听' : title }], idPrefix: 'clot', fit: false })
+      c.structuralDecor()
+      const sc = structuralTextColor(tokens)
+      c.text({ x: 1.0, y: 3.0, w: 11.3, h: 1.0, fontSize: Math.max(30, tokens.fontSizeLadder.sectionTitle), color: sc, font: tokens.fonts.title, bold: true, align: 'center', valign: 'mid', paragraphs: [{ text: title === '' ? '谢谢聆听' : title }], idPrefix: 'clot', fit: false })
       if (rawContent.subtitle !== undefined && rawContent.subtitle !== '') {
-        c.text({ x: 1.0, y: 4.3, w: 11.3, h: 0.5, fontSize: 16, color: tokens.colors.onPrimary, align: 'center', paragraphs: [{ text: rawContent.subtitle }], idPrefix: 'clos', floor: 13 })
+        c.shape({ x: 6.22, y: 4.12, w: 0.9, h: 0.05, shape: 'rect', fill: sc, background: true, idPrefix: 'clorule' })
+        c.text({ x: 1.0, y: 4.35, w: 11.3, h: 0.5, fontSize: 16, color: sc, align: 'center', paragraphs: [{ text: rawContent.subtitle }], idPrefix: 'clos', floor: 13 })
       }
-      c.shape({ x: 0, y: 7.1, w: CANVAS_W_IN, h: 0.4, shape: 'rect', fill: tokens.colors.accent, background: true, idPrefix: 'clobar' })
       break
     }
     case 'bullets': {
@@ -711,32 +1071,32 @@ export function composeSceneFromContent(rawContent: PageContentInput, fallback: 
     }
     case 'icon-list': {
       c.titleBand(title)
-      c.iconList(rawContent.items ?? need('items: ["要点短句一","要点短句二"]'))
+      c.iconList(rawContent.items ?? need('items: ["要点短句一","要点短句二"]'), rawContent.icons, rawContent.layout)
       break
     }
     case 'two-col': {
       c.titleBand(title)
-      c.twoCards(rawContent.columns ?? need(TYPE_REQUIREMENTS['two-col']))
+      c.twoCards(rawContent.columns ?? need(TYPE_REQUIREMENTS['two-col']), { layout: rawContent.layout })
       break
     }
     case 'comparison': {
       c.titleBand(title)
-      c.twoCards(rawContent.columns ?? need(TYPE_REQUIREMENTS['comparison']), { vs: true, height: 4.6 })
+      c.twoCards(rawContent.columns ?? need(TYPE_REQUIREMENTS['comparison']), { vs: true, height: 4.6, layout: rawContent.layout })
       break
     }
     case 'process': {
       c.titleBand(title)
-      c.process(rawContent.steps ?? need('steps: [{name:"步骤名",desc:"说明"},…]'))
+      c.process(rawContent.steps ?? need('steps: [{name:"步骤名",desc:"说明"},…]'), rawContent.layout)
       break
     }
     case 'timeline': {
       c.titleBand(title)
-      c.timeline(rawContent.events ?? need('events: [{label:"2019",desc:"事件"},…]'))
+      c.timeline(rawContent.events ?? need('events: [{label:"2019",desc:"事件"},…]'), rawContent.layout)
       break
     }
     case 'cards': {
       c.titleBand(title)
-      c.cards(rawContent.cards ?? need('cards: [{title:"卡题",desc:"说明"},…]'))
+      c.cards(rawContent.cards ?? need('cards: [{title:"卡题",desc:"说明"},…]'), rawContent.layout)
       break
     }
     case 'hierarchy': {
@@ -765,7 +1125,7 @@ export function composeSceneFromContent(rawContent: PageContentInput, fallback: 
     }
     case 'image-text': {
       c.titleBand(title)
-      c.imageText(rawContent.image ?? {}, fallback)
+      c.imageText(rawContent.image ?? {}, fallback, rawContent.layout)
       break
     }
   }

@@ -14,9 +14,12 @@ import * as pptxNamespace from 'pptxgenjs'
 import type PptxGenJS from 'pptxgenjs'
 import type { ChartElement, ImageElement, PageScene, SceneElement, ShapeElement, TableElement, TextElement } from './schema.js'
 import type { ResolvedTheme } from './themes.js'
+import { structuralGradient } from './themes.js'
 import type { DeckStore } from './deck-store.js'
 import { toPptxColor } from './units.js'
 import { readAssetBuffer } from './assets.js'
+import { svgToPngDataUri, PPTX_RASTER_PPI } from './rasterize.js'
+import { renderTextureSvg, renderGradientSvg } from './texture.js'
 import { CANVAS_H_IN, CANVAS_W_IN } from './units.js'
 import { describePptxModule, pickPptxConstructor, type PickedPptx } from './diag.js'
 
@@ -64,7 +67,7 @@ export interface RenderPptxResult {
   notes: string[]
 }
 
-/** 场景形状名 → pptxgenjs ShapeType 值（与 OOXML 预设名一致，调用点做枚举断言）。 */
+/** 场景形状名 → pptxgenjs ShapeType 值（与 OOXML 预设名一致，调用点做枚举断言）。0.14.0 扩充 7 种。 */
 const SHAPE_NAME: Record<string, string> = {
   rect: 'rect',
   roundRect: 'roundRect',
@@ -75,6 +78,24 @@ const SHAPE_NAME: Record<string, string> = {
   rightArrow: 'rightArrow',
   pentagon: 'pentagon',
   line: 'line',
+  hexagon: 'hexagon',
+  parallelogram: 'parallelogram',
+  trapezoid: 'trapezoid',
+  leftArrow: 'leftArrow',
+  upArrow: 'upArrow',
+  downArrow: 'downArrow',
+  star5: 'star5',
+  // 0.21.0 P3：pptxgenjs 原生支持的 OOXML 预设名（共 179 种，按需增量放开）
+  octagon: 'octagon',
+  plus: 'plus',
+  donut: 'donut',
+  frame: 'frame',
+  can: 'can',
+  teardrop: 'teardrop',
+  pie: 'pie',
+  lightningBolt: 'lightningBolt',
+  cloud: 'cloud',
+  heart: 'heart',
 }
 
 function asShape(name: string): PptxGenJS.ShapeType {
@@ -88,6 +109,12 @@ function gradientColor(fill: string | { from: string; to: string; angle: number 
 
 function baseOpts(el: SceneElement): { x: number; y: number; w: number; h: number; objectName: string } {
   return { x: el.x, y: el.y, w: el.w, h: el.h, objectName: el.id }
+}
+
+/** 旋转元素 → pptxgenjs rotate 选项（度，顺时针）。rotation 是 shape/image 的可选字段（0.14.0）。 */
+function rotateOpts(el: SceneElement): Record<string, unknown> {
+  const rotation = (el as { rotation?: number }).rotation
+  return rotation !== undefined && rotation !== 0 ? { rotate: rotation } : {}
 }
 
 function orderedElements(page: PageScene): SceneElement[] {
@@ -152,7 +179,25 @@ function addShapeElement(slide: PptxSlide, el: ShapeElement): string | null {
     el.border !== undefined
       ? { color: toPptxColor(el.border.color), width: el.border.width, dashType: el.border.style === 'dashed' ? 'dash' : 'solid' }
       : { type: 'none' }
-  const options: Record<string, unknown> = { ...baseOpts(el), fill: fillOption, line: lineOption }
+  // 轻阴影（0.15.0）：角度/模糊/偏移语义与 HTML box-shadow 一致（0=右、90=正下，单位磅）
+  const shadowOption =
+    el.shadow !== undefined
+      ? {
+          type: 'outer' as const,
+          color: toPptxColor(el.shadow.color ?? '#000000'),
+          opacity: el.shadow.opacity ?? 0.16,
+          blur: el.shadow.blur ?? 7,
+          angle: el.shadow.angle ?? 90,
+          offset: el.shadow.offset ?? 2,
+        }
+      : undefined
+  const options: Record<string, unknown> = {
+    ...baseOpts(el),
+    ...rotateOpts(el),
+    fill: fillOption,
+    line: lineOption,
+    ...(shadowOption !== undefined ? { shadow: shadowOption } : {}),
+  }
   if (el.shape === 'line') {
     slide.addShape(asShape('line'), options as never)
     return null
@@ -186,11 +231,16 @@ async function addImageElement(slide: PptxSlide, el: ImageElement, input: Render
     )
     return
   }
-  // 内联矢量图（0.13.0）：与整页 svg 路线同一嵌入方式——PowerPoint 2016+ 原生显示
+  // 内联矢量图（0.13.0）：0.17.2 起先光栅化为真 PNG——pptxgenjs 的 svg data URI
+  // 会落盘"伪 PNG 主 blip + svgBlip"，WPS/旧版 Office 读主 blip 解码失败即图消失；
+  // 光栅化不可用时回退矢量嵌入（PowerPoint 2016+ 仍显示）
   if (el.svg !== undefined) {
+    const data = svgToPngDataUri(el.svg, el.w * PPTX_RASTER_PPI, el.h * PPTX_RASTER_PPI)
+      ?? `image/svg+xml;base64,${Buffer.from(el.svg, 'utf8').toString('base64')}`
     slide.addImage({
-      data: `image/svg+xml;base64,${Buffer.from(el.svg, 'utf8').toString('base64')}`,
+      data,
       ...baseOpts(el),
+      ...rotateOpts(el),
     } as never)
     return
   }
@@ -202,6 +252,7 @@ async function addImageElement(slide: PptxSlide, el: ImageElement, input: Render
   slide.addImage({
     data,
     ...baseOpts(el),
+    ...rotateOpts(el),
     ...(el.fit === 'fill' ? {} : { sizing: { type: el.fit, w: el.w, h: el.h } }),
   } as never)
 }
@@ -314,24 +365,56 @@ export async function renderDeckPptx(input: RenderPptxInput): Promise<RenderPptx
 
   const notes: string[] = []
   let elementCount = 0
+  // 背景纹理（0.18.0 T2-2）：整册光栅化一次，内容页复用同一 media（稀疏透明 PNG 体积很小）。
+  // 纹样是低频图案，100PPI 足够（200PPI 的 2667px 透明 PNG ≈80KB，多页 deck 会重复计入）
+  let textureData: string | undefined
+  if (theme.texture !== undefined) {
+    const texPpi = PPTX_RASTER_PPI / 2
+    const textureSvg = renderTextureSvg(theme.texture)
+    textureData = svgToPngDataUri(textureSvg, CANVAS_W_IN * texPpi, CANVAS_H_IN * texPpi)
+      ?? `image/svg+xml;base64,${Buffer.from(textureSvg, 'utf8').toString('base64')}`
+  }
+  // 结构页双色渐变（0.19.0 T3-1）：整册光栅化一次，垫在所有元素之下；
+  // slide.background 保留基色（from 端）作为无图查看器/提取工具的回退底
+  const grad = structuralGradient(theme)
+  let gradientData: string | undefined
+  {
+    const gradPpi = PPTX_RASTER_PPI / 2
+    const gradSvg = renderGradientSvg(grad.from, grad.to, grad.angle)
+    gradientData = svgToPngDataUri(gradSvg, CANVAS_W_IN * gradPpi, CANVAS_H_IN * gradPpi)
+  }
   for (const page of pages) {
     const slide = pptx.addSlide()
     if (page.background?.color !== undefined) {
       slide.background = { color: toPptxColor(page.background.color) }
+      // 结构页主色底 → 注入 primary→secondary 渐变 PNG（HTML 端为 CSS 渐变，双端同令牌）
+      if (gradientData !== undefined) {
+        slide.addImage({ data: gradientData, x: 0, y: 0, w: CANVAS_W_IN, h: CANVAS_H_IN })
+        elementCount += 1
+      }
     } else if (page.background?.gradient !== undefined) {
       slide.background = { color: toPptxColor(page.background.gradient.from) }
       notes.push(`第 ${page.id} 页渐变背景在 PPTX 端回退为纯色`)
     } else {
       slide.background = { color: toPptxColor(theme.colors.bg) }
+      // 内容页（铺主题底色的页）注入底纹；结构页有渐变底+装饰不注入
+      if (textureData !== undefined) {
+        slide.addImage({ data: textureData, x: 0, y: 0, w: CANVAS_W_IN, h: CANVAS_H_IN })
+        elementCount += 1
+      }
     }
-    // svg 路线页（0.10.0）：整页矢量图嵌入——与 HTML 预览逐像素一致；
-    // PowerPoint 2016+ 原生显示 SVG，旧版本可能显示占位
+    // svg 路线页（0.10.0）：整页矢量图——0.17.2 起光栅化为 200PPI 位图嵌入
+    // （与元素级 svg 同因：伪 PNG fallback 在 WPS/旧版 Office 上不显示）
     if (page.svg !== undefined) {
+      const data = svgToPngDataUri(page.svg, CANVAS_W_IN * PPTX_RASTER_PPI, CANVAS_H_IN * PPTX_RASTER_PPI)
+        ?? `image/svg+xml;base64,${Buffer.from(page.svg, 'utf8').toString('base64')}`
       slide.addImage({
-        data: `image/svg+xml;base64,${Buffer.from(page.svg, 'utf8').toString('base64')}`,
+        data,
         x: 0, y: 0, w: CANVAS_W_IN, h: CANVAS_H_IN,
       })
-      notes.push(`第 ${page.id} 页为 SVG 自由绘制：PPTX 端以整页矢量图嵌入（PowerPoint 2016+ 显示；可右键"转换为形状"恢复部分可编辑性）`)
+      notes.push(data.startsWith('image/png')
+        ? `第 ${page.id} 页为 SVG 自由绘制：PPTX 端以 ${PPTX_RASTER_PPI}PPI 位图嵌入（全查看器兼容）`
+        : `第 ${page.id} 页为 SVG 自由绘制：PPTX 端以整页矢量图嵌入（PowerPoint 2016+ 显示；可右键"转换为形状"恢复部分可编辑性）`)
       elementCount += 1
       if (page.notes !== undefined && page.notes !== '') slide.addNotes(page.notes)
       continue

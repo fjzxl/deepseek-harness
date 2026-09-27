@@ -6,9 +6,12 @@
  *   design/tokens.json 全 deck 锁定的配色/字体/字号阶梯/标题锚点/栅格
  */
 import { z } from 'zod'
+import { readFile } from 'node:fs/promises'
+import { resolve } from 'node:path'
+import { extractPptxTheme, suggestImportedTheme } from '../theme-import.js'
 import type { DeckDensity, DeckOutline, DesignSpec, DesignTokens, InfoStructure } from '../schema.js'
 import { designSpecSchema, paletteOverridesSchema } from '../schema.js'
-import { THEME_CATEGORIES, THEME_CATEGORY_LABELS, buildDesignTokens, getTheme, THEMES, themeSummaries } from '../themes.js'
+import { THEME_CATEGORIES, THEME_CATEGORY_LABELS, buildDesignTokens, getTheme, THEMES, themeSummaries, textureFromTints } from '../themes.js'
 import type { ThemeCategory } from '../themes.js'
 import { createDeckLogger } from '../logger.js'
 import { requireDeckState } from '../deck-store.js'
@@ -171,7 +174,7 @@ function scenarioScheme(brief: {
   return null
 }
 
-export function createThemeTools(_config: ResolvedPptStudioConfig): ToolDefinition[] {
+export function createThemeTools(config: ResolvedPptStudioConfig): ToolDefinition[] {
   return [
     {
       name: 'ppt_themes',
@@ -225,6 +228,70 @@ export function createThemeTools(_config: ResolvedPptStudioConfig): ToolDefiniti
           .filter(t => t.category !== args.topicType)
           .map(t => ({ ...t, recommended: false }))
         return { themes: [...recommended, ...rest], topicType: args.topicType }
+      },
+    },
+    {
+      // 0.21.0 P2（roadmap-aippt-borrowing）：外部 PPTX 模板导入（格式参考）——
+      // 解包 themeN.xml 抽 clrScheme/fontScheme → 8 色板 + 字体建议。与品牌取色互补：
+      // 那是从图提色，这是从既有模板提整套主题（吃掉存量模板）。只建议不代用。
+      name: 'ppt_theme_import',
+      description:
+        '导入外部 PPTX 模板的主题：解包读取其主题色板（clrScheme 12 语义色）与字体方案，' +
+        '派生一组 paletteOverrides（bg/surface/primary/secondary/accent/text/textMuted/onPrimary 8 色）+ 字体建议。' +
+        '用于用户拿着现成模板/公司旧 PPT 说"照这个风格来"。只建议不代用：回执展示给用户，' +
+        '认可后把 paletteOverrides（及字体，作为主题选择参考）带进 ppt_design_lock。中文：导入外部模板主题。',
+      parameters: {
+        type: 'object',
+        properties: {
+          deckId: { type: 'string', description: '目标 deck' },
+          path: { type: 'string', description: 'PPTX 文件路径（相对会话工作目录或绝对路径）' },
+        },
+        required: ['deckId', 'path'],
+      },
+      output: {
+        schema: { type: 'object', properties: { paletteSuggestion: { type: 'object' } }, additionalProperties: true },
+        render: (_args, value) => {
+          const v = asRecord(value)
+          const palette = asRecord(v.paletteSuggestion)
+          const colors = asRecord(palette.paletteOverrides)
+          const lines = [
+            `📥 已从 ${String(v.source)} 抽取模板主题（${String(v.dark) === 'true' ? '深色' : '浅色'}）：`,
+            Object.entries(colors).map(([k, val]) => `${k}=${String(val)}`).join('｜'),
+          ]
+          const fonts = asRecord(v.fonts)
+          if (fonts.title !== undefined) lines.push(`字体建议：标题 ${String(fonts.title)} / 正文 ${String(fonts.body)}`)
+          const notes = Array.isArray(palette.notes) ? palette.notes : []
+          if (notes.length > 0) lines.push(`派生说明：${notes.join('；')}`)
+          lines.push('请展示给用户确认：认可就把这份 paletteOverrides 带进 ppt_design_lock（字体是否采用也听用户的）；不认可沿用内置主题。')
+          return oneText(lines.join('\n'))
+        },
+      },
+      execute: async (rawArgs, exec) => {
+        exec?.signal?.throwIfAborted()
+        const args = z.object({ deckId: z.string().min(1), path: z.string().min(1) }).parse(asRecord(rawArgs))
+        const { store, workspaceRoot } = resolveToolContext(config, exec)
+        await requireDeckState(store, args.deckId)
+        const absolute = resolve(workspaceRoot, args.path)
+        let buffer: Buffer
+        try {
+          buffer = await readFile(absolute)
+        } catch {
+          throw new Error(`PPTX 文件读取失败：${absolute}（检查路径是否在会话工作目录内）`)
+        }
+        const extracted = extractPptxTheme(buffer)
+        if (extracted === undefined) {
+          throw new Error('不是有效的 PPTX 模板（缺少 [Content_Types].xml 或 theme/themeN.xml 中的主题色定义）——支持 Office/WPS 生成的 .pptx，不支持 .ppt 二进制或纯图片打包')
+        }
+        const suggestion = suggestImportedTheme(extracted)
+        const logger = createDeckLogger(store.paths(args.deckId).root, args.deckId)
+        logger.info('design', '外部模板主题已导入', { file: extracted.themeFile, primary: suggestion.paletteOverrides.primary })
+        return {
+          source: `${args.path}（${extracted.themeFile}）`,
+          themeColors: extracted.clrScheme,
+          fontsFound: extracted.fonts,
+          dark: suggestion.dark,
+          paletteSuggestion: suggestion,
+        }
       },
     },
   ]
@@ -355,6 +422,7 @@ export function createDesignTools(config: ResolvedPptStudioConfig): ToolDefiniti
         '有其他确认关卡但不含 prototype 时同样生成代表页（作为可选建议）；打包模式（无逐阶段确认）不生成。' +
         '两种方式二选一：①带 themeId/density（ppt_design_propose 预设选定值或简报原定）按主题生成；' +
         '②带 copyFromDeckId 从同工作区另一 deck 复用设计（周报系列/系列课程等复用品牌），令牌原样克隆、密度策略沿用源 deck。' +
+        '可选 texture（0.18.0）：内容页背景纹样 dots/diagonal/lattice/none（auto=主题默认），零素材增加质感。' +
         '前置条件：全部部分蓝图完成且内容页数与确认值一致、封面/目录/结尾齐备。中文：锁定设计规范与视觉令牌（可复用模板）。',
       parameters: {
         type: 'object',
@@ -362,7 +430,8 @@ export function createDesignTools(config: ResolvedPptStudioConfig): ToolDefiniti
           deckId: { type: 'string' },
           themeId: { type: 'string', description: '可选：用户在 ppt_design_propose 预设中选定的主题（缺省用简报原定主题）；与 copyFromDeckId 互斥' },
           density: { type: 'string', enum: ['sparse', 'normal', 'dense'], description: '可选：选定方案的密度（缺省用简报原定密度）；与 copyFromDeckId 互斥' },
-          paletteOverrides: { type: 'object', description: '可选：色板覆盖（#RRGGBB）：bg/surface/primary/secondary/accent/text/textMuted/onPrimary；与 copyFromDeckId 互斥' },
+          paletteOverrides: { type: 'object', description: '可选：色板覆盖（#RRGGBB）：bg/surface/primary/secondary/accent/text/textMuted/onPrimary；与 copyFromDeckId 互斥。品牌色可来自 ppt_asset_register 登记品牌图提取的 paletteSuggestion' },
+          texture: { type: 'string', enum: ['auto', 'dots', 'diagonal', 'lattice', 'none'], description: '可选（0.18.0）：内容页背景纹样——auto=按主题默认（点阵/斜线/窗棂），none=关闭，其余强制指定；颜色与透明度由锁定色阶确定性计算' },
           copyFromDeckId: { type: 'string', description: '可选：复用源 deck 的设计令牌（同工作区已锁定设计的 deck，如上周的汇报）；与 themeId/density/paletteOverrides 互斥' },
           prototypePageIds: { type: 'array', items: { type: 'string' }, description: '可选（≤3 个内容页 id）：用户在蓝图阶段标记"最关心这几页"——指定后 Prototype 代表页用这份清单（而非结构聚类自动挑选）；打包模式（无逐阶段确认）不适用', maxItems: 3 },
         },
@@ -386,6 +455,9 @@ export function createDesignTools(config: ResolvedPptStudioConfig): ToolDefiniti
               : `✅ 设计已锁定（主题 ${String(tokens.themeId)}）：`,
             `  色板：primary ${String(colors.primary)} / secondary ${String(colors.secondary)} / accent ${String(colors.accent)}（改页只能用锁定色）`,
             `  字体：标题 ${String(fonts.title)} / 正文 ${String(fonts.body)}`,
+            ...(asRecord(tokens.texture) !== undefined
+              ? [`  背景纹样：${String(asRecord(tokens.texture)?.kind)}（内容页低透明度底纹，结构页不注入）`]
+              : []),
             `  密度策略：有图页文字 ≤${String(policy.withVisualCharBudget)} 字，无图页 ≤${String(policy.plainCharBudget)} 字`,
           ]
           if (proto.length > 0) {
@@ -413,6 +485,7 @@ export function createDesignTools(config: ResolvedPptStudioConfig): ToolDefiniti
             themeId: z.string().min(1).max(40).optional(),
             density: z.enum(['sparse', 'normal', 'dense']).optional(),
             paletteOverrides: paletteOverridesSchema.optional(),
+            texture: z.enum(['auto', 'dots', 'diagonal', 'lattice', 'none']).optional(),
             copyFromDeckId: z.string().min(1).optional(),
             prototypePageIds: z.array(z.string().min(1)).max(3).optional(),
           })
@@ -470,6 +543,17 @@ export function createDesignTools(config: ResolvedPptStudioConfig): ToolDefiniti
           specNotes = defaultSpecNotes(specPolicy)
         }
 
+        // 纹样覆盖（0.18.0）：auto=主题默认（已在 buildDesignTokens 里），none=关闭，其余强制指定。
+        // 与 copyFrom 兼容：复用品牌模板时换纹样是合法的呈现层微调（色板/字体仍取源 deck）。
+        if (args.texture !== undefined && args.texture !== 'auto') {
+          if (args.texture === 'none') {
+            delete tokens.texture
+          } else {
+            const base = textureFromTints(tokens.tints, tokens.colors.bg) ?? { kind: 'dots' as const, color: tokens.colors.primary, opacity: 0.4 }
+            tokens.texture = { ...base, kind: args.texture }
+          }
+        }
+
         // 蓝图完整性终检
         const problems: string[] = []
         const structuralTypes = ['cover', 'toc', 'closing']
@@ -507,6 +591,33 @@ export function createDesignTools(config: ResolvedPptStudioConfig): ToolDefiniti
         }
         const prototypeRequired = stages.has('prototype')
 
+        // 图文配比闸门（0.17.1，蓝图期拦截——写完再改是全册级返工）：
+        // 真实事故 d20260922-234438：visualStyle=balanced 但 29 页只 1 页 visual 且挂在 cover 上，
+        // 写完后 VISUAL_RATIO_LOW 的 warning 被（弱档）无视，成品几乎无图。
+        // visual 档低于 1/3 = error 拒绝锁定；balanced 低于 1/5 = 回执警告（不拦）；text 不查。
+        const visualStyle = brief?.visualStyle ?? 'balanced'
+        const ratioNotes: string[] = []
+        if (visualStyle !== 'text') {
+          const contentPlanned = outline.pages.filter(p => p.sectionId !== 's0' && p.type !== 'section')
+          const visualPlanned = contentPlanned.filter(p => p.visual === 'image' || p.visual === 'chart')
+          const plannedRatio = contentPlanned.length > 0 ? visualPlanned.length / contentPlanned.length : 0
+          const floor = visualStyle === 'visual' ? 1 / 3 : 1 / 5
+          const need = Math.ceil(floor * Math.max(contentPlanned.length, 1))
+          if (visualStyle === 'visual' && plannedRatio < floor) {
+            throw new Error(
+              `图文配比不足：蓝图 ${contentPlanned.length} 个内容页中只有 ${visualPlanned.length} 页计划了图/图表（目标 ≥1/3，还差 ${Math.max(need - visualPlanned.length, 1)} 页）。` +
+                '锁定前先补：重调 ppt_section_draft 把适合图示化的页改成 image-text/chart 页型并标 visual（image-text 页给 image.illustration 图示 JSON）。' +
+                '这是蓝图期闸门：现在改的是蓝图文字，写完页再改是全册返工。',
+            )
+          }
+          if (visualStyle === 'balanced' && plannedRatio < floor) {
+            ratioNotes.push(
+              `⚠️ 图文配比偏低：蓝图 ${contentPlanned.length} 个内容页中只有 ${visualPlanned.length} 页计划了图/图表（${Math.round(plannedRatio * 100)}% < ${Math.round(floor * 100)}%）。` +
+                '建议现在重调 ppt_section_draft 给若干页补 visual:image/chart（改蓝图比写完重写便宜得多）；用户已表态"图少"的话必须补。',
+            )
+          }
+        }
+
         const spec: DesignSpec = designSpecSchema.parse({
           deckId: args.deckId,
           density: specDensity,
@@ -533,7 +644,7 @@ export function createDesignTools(config: ResolvedPptStudioConfig): ToolDefiniti
           contentPages: contentCount,
           ...(copiedFrom !== undefined ? { copiedFrom } : {}),
         })
-        return { deckId: args.deckId, tokens, spec, ...(copiedFrom !== undefined ? { copiedFrom } : {}), ...(prototypeRequired ? { prototypeRequired: true } : {}) }
+        return { deckId: args.deckId, tokens, spec, ...(copiedFrom !== undefined ? { copiedFrom } : {}), ...(prototypeRequired ? { prototypeRequired: true } : {}), ...(ratioNotes.length > 0 ? { ratioNotes } : {}) }
       },
     },
   ]

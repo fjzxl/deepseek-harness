@@ -1,6 +1,6 @@
 # dsh-ppt-studio：PPT 生成流程逻辑
 
-> 本文是生成流水线的**权威逻辑文档**（对应插件版本 0.11.1）：每个阶段做什么、产出什么、
+> 本文是生成流水线的**权威逻辑文档**（对应插件版本 0.14.0）：每个阶段做什么、产出什么、
 > 卡哪些确认关卡、校验哪些规则、修改如何传播。工具参数级细节见各工具的 JSON Schema
 > 与 `src/tools/*.ts`；面向模型的操作手册见 `skills/dsh-ppt-studio/SKILL.md`。
 
@@ -33,7 +33,7 @@
 |---|---|
 | 内容与视觉解耦 | 阶段 0–3 只处理"讲什么、讲多少、每页为什么存在"；颜色字体版式全部推迟到阶段 4 的令牌锁定 |
 | 每一步可确认、可回溯 | 每阶段产物是工作区里独立 JSON 文件；确认关卡数量由**生成模式**（quick/standard/precise）决定；断点续跑天然支持 |
-| 质量靠确定性规则而非自觉 | 40 条校验规则（见第六节）纯代码执行，error 拒绝落盘/渲染，warning 必须知情 |
+| 质量靠确定性规则而非自觉 | 44 条校验规则（见第六节）纯代码执行，error 拒绝落盘/渲染，warning 必须知情 |
 | 修改影响范围可控 | 页级指纹 + 全册指纹双闸门；改一页只有该页进 revalidated 重点清单（校验每次全量执行、毫秒级），改设计令牌/大纲才触发全册重检重渲染 |
 
 **确认点（0.9.0 收敛，0.9.1 运行时全面解耦：唯一开关是 `confirmStages`）**：brief 落盘时把 mode 展开为确认点数组——
@@ -48,7 +48,7 @@
 
 | 路线 | 页面形态 | PPTX 产物 | 校验保护 |
 |---|---|---|---|
-| `native`（默认） | elements 绝对坐标清单（17 页型） | 原生文本/形状/图表/表格，逐元素可编辑 | 全部 40 条规则（越界/互压/容量/密度/图表…） |
+| `native`（默认） | elements 绝对坐标清单（17 页型） | 原生文本/形状/图表/表格，逐元素可编辑 | 全部 44 条规则（越界/互压/容量/密度/图表/装饰有效性/槽位契约/空容器…） |
 | `svg` | 整页 SVG 源码（viewBox 固定 `0 0 1280 720`，自由路径/渐变/构图） | **整页矢量图嵌入**（PowerPoint 2016+ 显示；可右键"转换为形状"恢复部分可编辑性） | 安全面与品牌：SVG_VIEWSIZE / SVG_UNSAFE / TOKEN_COLOR（6 位 hex 尽力识别）+ 证据扫描；**版式确定性规则不适用** |
 
 svg 路线的取舍必须在选择时向用户明示：视觉自由度换掉了版式保护与元素级可编辑性——写页后务必 `ppt_preview_update` 肉眼把关。两条路线共享同一套流水线（简报/大纲/页数/蓝图/设计锁定/校验指纹/修改循环/预览），tokens 锁定色板对两者都生效；路线是 deck 级选择，中途不改（页面 schema 保证 elements/svg 二选一）。
@@ -143,7 +143,7 @@ svg 路线的取舍必须在选择时向用户明示：视觉自由度换掉了�
 | 项 | 内容 |
 |---|---|
 | 工具 | `ppt_themes`（对话中列 12 套主题，可选 topicType 推荐）、`ppt_brief_create` |
-| 入参 | title / topic / audience / **scenario** / **objective** / **durationMin** / themeId / tone / density / **mode** / **evidenceLevel** / paletteOverrides |
+| 入参 | title / topic / audience / **scenario** / **objective** / **durationMin** / themeId / tone / density / **mode** / **modelProfile**（0.14.0） / **evidenceLevel** / paletteOverrides |
 | 产物 | `brief.json`；创建 deck 工作区；stage=briefed |
 | 确认关卡 | standard/precise：简报全文必须原样展示给用户确认；quick：不逐项确认（后续打包一次） |
 
@@ -154,6 +154,7 @@ svg 路线的取舍必须在选择时向用户明示：视觉自由度换掉了�
 - themeId 是**初始偏好**，阶段 4 仍可通过设计预设更换。
 - **智能推荐**：每套主题带 category 标签（tech/business/education/gov/culture/event）；模型从简报判断类型后带 `topicType` 调 `ppt_themes`，同类主题排前并标 ⭐推荐（纯确定性，无模糊判断）。
 - **mode（生成模式，0.7.0；0.9.1 完成解耦）**：quick=1 个打包确认（内容方向一条消息），其余采纳建议值；standard=默认逐阶段确认；precise=standard + Prototype 关卡。mode 只是 confirmStages 的预设捷径，**不影响任何校验与行为分支**——brief/design_lock/校验器统一读展开后的确认点数组；叙事链严格度归 strictness、证据严格度归 evidenceLevel。
+- **modelProfile（模型档位，0.14.0，正交旋钮）**：`weak`（默认）= 弱模型防御性 SOP——写页主路径 content 内容模式、连败自动降级兜底（弱模型辅助闩锁/逐页蓝图降级）、熔断阈值 5；`strong` = 强模型——写页以 elements 手写精细版式为主路径（形状词汇表 16 种 + rotation），未显式指定 mode 时默认 quick，弱模型辅助闩锁不自动开启、熔断阈值放宽到 8。档位只改「推荐路径与防御机制的激进程度」，**不改任何校验规则、令牌锁定与内网红线**；档位按当前驱动模型能力在简报阶段自判（模型画像而非用户偏好），落 brief.json 固化。
 - **renderRoute（渲染路线，0.10.0）**：native=pptxgenjs 原生元素（默认，逐元素可编辑 + 全部版式规则保护）；svg=自由 SVG 绘制（视觉自由度最高，PPTX 端整页矢量图嵌入 PowerPoint 2016+ 显示，版式确定性规则不适用——详见第一节渲染路线表）。**必须向用户说明取舍后再选**；默认 native。
 - **evidenceLevel（证据等级，0.7.0）**：none=不要求来源；business=数字论断需来源；academic=fact/data 论断全部需来源。**内网适配**：来源只能来自用户提供的材料，无法核实的数据改定性表述或标「数据待补充」，禁止联网取数与编造引用。
 - **referenceMaterials（参考材料清单，0.8.1；0.9.1 精确引用）**：`[{id, title, note?}]`——提供后 evidence 必须引用其中条目（`materialId` 按 id **精确匹配**优先；source 的 id/标题子串匹配保留兼容），EVIDENCE_SOURCE_MISSING 从 warning 升级为 error 拒绝保存；未提供清单时维持 warning（宽容模式）。"内网来源=用户材料"由此从纪律变成可执行约束。
@@ -244,10 +245,10 @@ svg 路线的取舍必须在选择时向用户明示：视觉自由度换掉了�
 | 产物 | `pages/p00N.json`；stage=writing |
 | 节奏 | **不逐部分停下来等确认**；每完成一个部分调 `ppt_preview_update`，用户在浏览器边看边提修改（局部修改走改页流程，不阻塞后续部分） |
 
-**写页双路径（0.11.0）**：native 路线的 `ppt_page_write` 有两种输入形态——
+**写页双路径（0.11.0；0.14.0 起主路径按 modelProfile 选）**：native 路线的 `ppt_page_write` 有两种输入形态——
 
-- **content 内容模式（推荐，弱模型主路径）**：`scene.content` 只传语义内容（标题/条目/图表数据等扁平字段），**版式引擎**（`src/autolayout.ts`）按页型模板 + 锁定令牌确定性展开为完整元素清单。layouts.md 的坐标速查从"给模型阅读的文档"变成"代码执行的模板"：坐标/字号阶梯/令牌色/标题条/卡片衬底全部自动，文字过多自动缩字号并知情——越界/互压/溢出/令牌这类 error 级拒绝从源头消失（单测逐页型断言引擎产物 errorCount === 0）。产物是普通 elements 场景（落盘格式不变，渲染/校验/迁移零改动）；type/title 缺省取蓝图值；按蓝图整页重写不受丢元素闸门限制。
-- **手写元素模式**：`scene.elements` 逐元素绝对坐标（原路径，强模型精细控制版式用）。
+- **content 内容模式（weak 档主路径 / 两档通用快路径）**：`scene.content` 只传语义内容（标题/条目/图表数据等扁平字段），**版式引擎**（`src/autolayout.ts`）按页型模板 + 锁定令牌确定性展开为完整元素清单。layouts.md 的坐标速查从"给模型阅读的文档"变成"代码执行的模板"：坐标/字号阶梯/令牌色/标题条/卡片衬底全部自动，文字过多自动缩字号并知情——越界/互压/溢出/令牌这类 error 级拒绝从源头消失（单测逐页型断言引擎产物 errorCount === 0）。产物是普通 elements 场景（落盘格式不变，渲染/校验/迁移零改动）；type/title 缺省取蓝图值；按蓝图整页重写不受丢元素闸门限制。
+- **手写元素模式（strong 档主路径——强模型直接做精细版式设计）**：`scene.elements` 逐元素绝对坐标。0.14.0 配套：形状词汇表 9→16 种（+hexagon/parallelogram/trapezoid/leftArrow/upArrow/downArrow/star5，OOXML 预设与 HTML clip-path 双端一致）；shape/image 支持 `rotation`（-180~180 度装饰旋转，校验按未旋转外接框——大角度装饰加 background:true）；工具描述内嵌排版纪律（文字容量自估公式/间距下限/反 AI 味铁律/内容铺满画布，移植自 genoffice 的强模型页面 prompt 法则）；成功路径回审计摘要（全过 ✅ / 版面类 warning 点名建议当页即改）。
 - **ppt_page_skeleton 骨架工具**：读蓝图页（type/title/keyMessage/contentBrief）用版式引擎生成占位场景（概要确定性切分，不做语义生成），落盘即可预览；模型随后 `append:true` 同 id 原位替换占位文字——「必然合法的脚手架 + 小步编辑」替代「从零生成大 JSON」。
 
 `ppt_page_write` 内部四段式管线（每页同步执行；content 模式在管线前先由引擎展开为 elements）：
@@ -271,7 +272,7 @@ svg 路线的取舍必须在选择时向用户明示：视觉自由度换掉了�
 - **配图先于写页**：蓝图 visual:image 的页先按 contentBrief 生成图片描述调 ppt_image_generate 拿 assetId 再写页（已配置生图时），减少占位割裂；未配置再走 placeholder。
 - **生图提示词与令牌协调（0.9.2，借鉴 ppt-master 的"同 deck 全部图共用色彩锚"纪律）**：prompt 是一段连贯散文——风格家族（同 deck 统一一种）+ 主体视觉名词 + 构图 + 色彩行为（写明占比并与锁定色板协调）+ 图内不写字（图内一个词 = 一次重生成的成本）。ppt_image_generate 在设计锁定后返回 deckPalette（bg/primary/accent）摘要，色彩协调靠返回提醒与 SOP 纪律达成，不静默改写用户 prompt。
 - 即时预览：`ppt_preview_update` 毫秒级把已写页面刷新到自包含 HTML 播放器，不出 PPTX、不要求 sceneHash——它是观察窗口不是终检。成功后自动打开浏览器（**默认每阶段各弹第一次**：即时预览首开一次、正式渲染完成再开一次，各自跨调用/重启不重复；`PPT_STUDIO_PREVIEW_AUTO_OPEN=0` 完全关闭、`=always` 恢复每次打开），URL 始终同时以文字给出。
-- **弱模型辅助闩锁（0.11.0）**：`ppt_page_write` 连续失败 ≥3 次（plugin.log 连败统计，与熔断/逐页降级同一数据源）后自动开启，deck 级持久化 `state.weakModelAssist`——写页 SOP 确定性切换为「content 内容模式 + ppt_page_skeleton 骨架 + append 小步增量」：裸 elements **整页替换**被拒绝（报错自带两种替代写法示例），content 模式、append 增量、svg 路线不受限；用户明确要求可 `overrideAssist:true` 恢复。开启/拦截报错均带 🔔 用户通知块（SOP 要求原样转述）。与 0.10.3 逐页降级同模式：连败的治法不是"报错写得更明白指望模型改对"，而是换一条对弱模型天然友好的路径。
+- **弱模型辅助闩锁（0.11.0；0.14.0 起 modelProfile=strong 的 deck 不自动开启——强模型失败是正常迭代，闩锁降级语义反而碍事；已开启的旧闩锁与 overrideAssist 语义不变）**：`ppt_page_write` 连续失败 ≥3 次（plugin.log 连败统计，与熔断/逐页降级同一数据源）后自动开启，deck 级持久化 `state.weakModelAssist`——写页 SOP 确定性切换为「content 内容模式 + ppt_page_skeleton 骨架 + append 小步增量」：裸 elements **整页替换**被拒绝（报错自带两种替代写法示例），content 模式、append 增量、svg 路线不受限；用户明确要求可 `overrideAssist:true` 恢复。开启/拦截报错均带 🔔 用户通知块（SOP 要求原样转述）。与 0.10.3 逐页降级同模式：连败的治法不是"报错写得更明白指望模型改对"，而是换一条对弱模型天然友好的路径。
 
 ### 阶段 6：Deck Integration——全册校验（依赖感知增量标注）
 
@@ -280,6 +281,8 @@ svg 路线的取舍必须在选择时向用户明示：视觉自由度换掉了�
 | 工具 | `ppt_scene_check` |
 | 产物 | `state.sceneHash`（全册指纹，含插件版本盐）+ `state.pageHashes`（页级指纹）+ storyline 叙事链摘要 + duration 时长估算 |
 | 检查 | 页集完整性（PAGE_MISSING/PAGE_ORPHAN）+ 全部单页规则 + 跨页集成规则（单调/多样性/节奏/叙事链/标题结论感） |
+
+**像素自审（0.22.0 可选，`visualAudit:true`）**：对本次变更页（revalidated）逐页 headless 截图 + 确定性启发式，产出 `VISUAL_EMPTY / VISUAL_BALANCE_H / VISUAL_BALANCE_V` 三类 **warning 级提醒**——与确定性校验互补（结构规则管"坐标合法"，像素层管"看上去不对"：近乎空白/左右失衡/垂直重心出界）。**不进 issues 闸门**（不计入 errorCount、不影响 ok 与渲染指纹语义）；截图落 `preview/audit/<pageId>.png`。修改循环中调版式后建议开启（每页约 2 秒）；浏览器找不到/截图失败静默降级为 note。
 
 **校验口径（0.9.1 澄清）：全量校验、增量标注**——每次调用对全部页执行全部规则（毫秒级，**无缓存**：规则演进、strictness/材料清单变化对存量 deck 即时生效），没有"未变页免检"：
 
@@ -305,10 +308,11 @@ svg 路线的取舍必须在选择时向用户明示：视觉自由度换掉了�
 - **渲染前复检与 check 同路**（0.9.1 对称性修复）：render 内嵌的最后一道 validateDeckPages 传入与 ppt_scene_check 完全相同的选项（strictness/evidenceLevel/referenceMaterials/parts/bulletsMax），闸门强度不因最后一道复检放松。
 - error 级问题存在即拒绝渲染。
 - **渲染 QA 能力边界（0.9.1 明示）**：本流程验证的是场景数据、文件结构与全部校验规则；办公软件实际渲染效果（字体回退/换行/图表标签细节）不在确定性验证范围内——以 HTML 预览（与 PPTX 同源场景+令牌的所见即所得）与打开 PPTX 的肉眼复核为准，render 返回文案明示这一边界。
+- **像素自审（0.22.0，渲染后自动）**：渲染完成后对全部页面 headless 截图 + 启发式（同阶段 6 的三条 warning 规则，截图落 `preview/audit/`），回执逐条列出提醒——闭合"盲写"循环：结构校验通过 ≠ 视觉均衡，失衡/空白页在此暴露后可回写重排再渲染。`PPT_STUDIO_VISUAL_AUDIT=0` 关闭；`PPT_STUDIO_AUDIT_BROWSER` 指定浏览器；浏览器缺失静默降级不影响产物。
 - **svg 页双端渲染（0.10.0）**：HTML 预览整页 SVG 原生内联（预览即真实渲染）；PPTX 端以整页矢量图嵌入（media/*.svg，PowerPoint 2016+ 显示，旧版本可能显示占位；可右键"转换为形状"恢复部分可编辑性）——renderNotes 每页记录这一取舍。
 - 双渲染器消费同一份 PageScene + 同一份锁定令牌：PPTX（pptxgenjs，原生文本/形状/表格/图表，ZIP 结构自检）与 HTML（几何一一对应：英寸×96=px、磅×4/3=px，图表 SVG 矢量重绘）。**两个产物都是原子写**（tmp + rename）：生成期间浏览器/PowerPoint 读到的要么是旧文件要么是完整新文件，不会出现写了一半的乱码残页（0.8.3，HTML 端补齐）。
 - 返回 pptxPath + previewUrl；渲染成功后自动打开浏览器预览（**默认每阶段各弹第一次**：即时预览首开一次、正式渲染完成再开一次，各自跨调用/重启不重复；`PPT_STUDIO_PREVIEW_AUTO_OPEN=0` 完全关闭、`=always` 恢复每次打开）。
-- **预览服务多根托管**：deck 按 DSH 会话工作目录生成，工具调用时自动把工作区登记到全局注册表（`~/.dsh/ppt-studio-workspaces.json`）；`node lib/preview-server.js` 合并"启动目录 + 注册表全部根"托管（列表页标注各 deck 所属工作区，未知 deck 的 404 附工作区清单；读取侧过滤失效根，登记时顺手剔除已删除工作区的残留条目（0.8.2），注册表文件不膨胀；**全部错误路径（404/403/405/500）返回样式化错误页**（0.8.4：与列表页同风格的完整 HTML——状态码大字 + 原因 + 处理指引 + 返回列表链接；自带 meta charset，中文永不乱码））——预览服务在任何目录启动都能看到任何会话生成的 deck。
+- **预览服务多根托管**：deck 按 DSH 会话工作目录生成，工具调用时自动把工作区登记到全局注册表（`~/.dsh/ppt-studio-workspaces.json`）；`node lib/preview-server.js` 合并"启动目录 + 注册表全部根"托管（列表页标注各 deck 所属工作区，未知 deck 的 404 附工作区清单；读取侧过滤失效根，登记时顺手剔除已删除工作区的残留条目（0.8.2），注册表文件不膨胀；**全部错误路径（404/403/405/500）返回样式化错误页**（0.8.4：与列表页同风格的完整 HTML——状态码大字 + 原因 + 处理指引 + 返回列表链接；自带 meta charset，中文永不乱码））——预览服务在任何目录启动都能看到任何会话生成的 deck。**懒注册（0.22.0）**：deck 请求未命中或访问列表页时重查注册表合并新根，运行期间新登记的工作区即时生效，不再需要重启预览服务。
 
 ### 阶段 8：Revision Loop——依赖感知修改循环
 
@@ -481,6 +485,7 @@ cover / toc / section / bullets / two-col / image-text / chart / table / quote /
 
 ```
 colors        8 色板（主题 + paletteOverrides 解析后的最终形态）
+tints         色阶（0.15.0）：primary/secondary/accent 各 50–900 九档——浅档向 bg 渐浅、深档向反方向加深；旧 deck 无此字段时版式回落 8 基色
 chartColors   图表循环色（≤6）
 fonts         title / body
 fontSizeLadder 封面/章节/内容页标题/正文/注释 五级字号（随密度）
@@ -596,6 +601,16 @@ grid          marginX 0.6 / contentTop 1.6 / contentBottom 7.0 / 画布 13.3333�
 | 0.10.2 | **校验报错可执行化（真实会话事故修复）**：模型调 ppt_section_draft 时页数与确认分配不符（s1 需 2 页只传 1 页），对报错原样重发 9+ 次直至熔断、用户中止——**页数/分配类校验错误全部附可执行示例**：section_draft 分配不符报错直接写明"部分 sN 需要 X 页（当前传入 Y 页），请提供 X 个 page 对象后重试，或重调 ppt_pageplan_confirm 改分配"；pageplan_confirm 分配总和不符报错列出当前传入的各部分分配与差距页数；内容页超预算报错附超出页数与各部分现状；三处错误均明示"参数校验拒绝，原样重发不会成功"。SKILL.md「排查」新增"参数校验类错误必须改参，不得原样重发"专条 |
 | 0.10.3 | **ppt_section_draft 连败自适应降级（逐页蓝图模式）+ 用户通知（同一事故的治本修复）**：0.10.2 把报错改成可执行提示，但"模型是否照做"不可控——同一部分连续 3 次因页数与确认分配被拒后**自动降级为逐页累积模式**：接受分次提交（每次 1 页也可）、追加而非覆盖（s0 按 type 去重累积）；只改提交粒度不改计划语义（累积总量仍精确等于确认分配，超剩余槽位照样拒绝并报槽位数；总页数/分配/下游校验不变）。闩锁持久化 `state.draftPagewise`（quota 快照），集满自动解除恢复整段覆盖，重调 pageplan_confirm / revise 亦解除；failureStreak 移入 toollog.ts 与熔断共用；降级回执带 🔔 用户通知块（"请把本段原样告知用户"）+ 进度"已收 X/N 页"，ppt_deck_status 同步展示；SKILL 立规则：🔔 通知必须原样转述用户。ppt_pageplan_confirm 不降级（页总数是用户决策） |
 | 0.11.0 | **版式引擎 + 写页双路径 + 弱模型辅助闩锁（量化 8B 级模型的系统性适配）**：弱模型手写元素清单（x/y/w/h 坐标算术 + 长 JSON 输出）是最大失败面——① `ppt_page_write` 新增 **scene.content 内容模式**：只传语义内容（标题/条目/图表数据等扁平字段），版式引擎（`src/autolayout.ts`）按页型模板 + 锁定令牌确定性展开为完整元素清单（坐标/字号阶梯/令牌色/标题条/卡片衬底全自动，文字过多自缩字号并知情，图表系列对齐/表格补列/未登记资产降占位在引擎内消化）；产物是普通 elements 场景，渲染/校验/迁移零改动；单测逐页型断言引擎产物通过全部 error 级校验。② 新工具 **ppt_page_skeleton**：按蓝图页生成合法骨架占位页（概要确定性切分），模型用 append 小步替换占位文字——「必然合法的脚手架 + 小步编辑」替代「从零生成大 JSON」。③ **弱模型辅助闩锁**（`state.weakModelAssist`，deck 级持久）：ppt_page_write 连续失败 ≥3 次自动开启，裸 elements 整页替换被拒绝并给出两种替代写法示例（content 模式 / 骨架+append；append 增量不受限；overrideAssist:true 可恢复）——与 0.10.3 逐页降级同模式：连败治法是换路径而非指望模型改对。工具 19→20；新增插件本地 vitest 配置与 57 项单测（版式引擎不变量 / 内容模式集成 / 闩锁行为 / 骨架工具 / 版本一致性） |
+| 0.12.0 | **版式引擎稀疏自适应 + process 满宽（真实 deck 用户反馈五项）**：process 步宽去钳制满宽均分；process 标题自适应（框高 0.8 + floor:12 缩字）；bullets 稀疏自适应（占不满时字号上调/段距拉开/垂直居中）；bullets 左装饰条 + iconList 步距/居中；SKILL 视觉优先规则（图示型页型优先、纯 bullets ≤1/3） |
+| 0.13.0 | **模型生成 SVG 矢量插图（无生图接口时的配图路径）**：image 元素与 content.image 新增 `svg`（sanitizeSvg 清洗 + viewBox 归一，引擎按比例适配图区）；HTML 内联渲染、PPTX 端 image/svg+xml 数据 URI 嵌入；SKILL 立插图纪律（简洁示意风格/锁定色板/形语言统一） |
+| 0.23.0 | **图示词表 5→8 + 像素自审回放校准 + SKILL 瘦身**：illustration 新增 pyramid（3-5 层，塔身左标签列右+虚线引导）/funnel（3-6 段上宽下窄）/cycle（2-6 环形接力，环外四向锚定标签 ≤8 字），层色 primary 色阶深→浅；视觉门 6/6 pass。像素自审存量回放（14 册 304 页真实截图）四类归因：toc 页设计性误报→结构页免判 H/V、密排页 cy 0.71-0.72 边缘噪声→V 带放宽 0.26–0.74、0.12 前旧版式 8 条真阳性、纹理主题零误报；复跑仅 1 条边缘存留。SKILL.md 瘦身 -3.1%（纯冗余：版本号考古标注/重复说明/错误表下放 reference/error-shapes.md）。单测 193→196 项 |
+| 0.22.0 | **像素自审闭环 + 预览懒注册（roadmap T3-4 落地）**：新增 src/visual-audit.ts——逐页渲染共用播放器 CSS 的单页 HTML、headless Edge/Chrome 截图（preview/audit/<pageId>.png）、确定性启发式三条 warning（VISUAL_EMPTY 近乎空白/VISUAL_BALANCE_H 左右失衡/VISUAL_BALANCE_V 垂直重心）；校准：列带密度第 10 百分位作底噪地板（吸收背景纹理/整宽装饰的均匀贡献）、失衡按占据带数判、整宽容器卡页（scene 声明）与位图照片页免判失衡（tint50 卡底与纹理像素同档，无阈值窗口）；挂接 ppt_deck_render 渲染后自动全册 + ppt_scene_check `visualAudit:true` 只审变更页；提醒不进 issues 闸门；浏览器缺失/失败静默降级（PPT_STUDIO_AUDIT_BROWSER 指定路径 / PPT_STUDIO_VISUAL_AUDIT=0 关闭）。预览服务懒注册：deck 未命中或列表页请求时重查工作区注册表，新工作目录首场 PPT 后免重启预览。单测 178→193 项 |
+| 0.18.0 | **视觉素材第二梯队 + 品牌取色（roadmap T2-1/T2-2/P5；T2-3 生图端点裁决不做——内网红线无可用端点）**：内置图标包 83 个（自绘线稿 24×24/stroke2.4，icon-list/cards/timeline 节点全升级为图标徽章；content 可显式给名或按文本关键词确定性自动选，词表 reference/icons.md；徽章配色自适应过装饰可见线）；tokens 新增 texture 背景纹理令牌（12 主题气质映射 dots/diagonal/lattice，色阶色+低透明度；**渲染器注入**非页面元素——sceneHash 不变、手写页同享、旧 deck 重渲染即得；HTML 整页 pattern / PPTX 整册光栅化一次 100PPI 复用；design_lock texture 参数可覆盖）；ppt_asset_register 品牌图取色（PNG/BMP 解码 + SVG hex 收集，零依赖；≤3 主色 + paletteSuggestion 派生色板建议，只建议不代用）。单测 134→166 项 |
+| 0.17.1 | **会话反馈五修**：content.type 槽位前置校验；深色主题提亮；design_lock 蓝图期配比闸门（visual<1/3 拒锁）+ 结构页 visual 归一 + VISUAL_PLAN_UNMET 升 error；allocation.reason 200；SKILL 主题原文/表格空行/visual 页型纪律 |
+| 0.17.0 | **content 2.0（用户评审四项决议）**：layout 版式意图词表（6 页型构图选择、代码执行坐标）；image.illustration 图示 JSON（flow/layers 代码渲染，消灭手写 SVG 笔误）；section_draft 扉页扩容（多 1 页 section 型自动分配+1）；样例关卡重定义（蓝图层只确认叙事，代表页真实渲染升为 standard 默认关卡） |
+| 0.16.0 | **写页防线 + 视觉风格开关（真实事故驱动）**：OUTLINE_PAGE_MISMATCH（写页槽位 vs 大纲页型，error——拦全册错位）；EMPTY_CONTAINER（roundRect 空卡片，error——拦截断重写）；brief 新旋钮 visualStyle（visual 图文优先配比硬指标 / balanced 默认 / text 文字优先节奏降级），校验 41→44 条 |
+| 0.15.0 | **视觉质量第一梯队（真实 deck 诊断驱动，见 docs/roadmap-visual-quality.md）**：色阶系统（tints 50–900 确定性计算，TOKEN_COLOR 扩入）；新规则 DECORATION_CONTRAST（装饰与背景亮度对比+色距双指标，校验 40→41 条）；层次三件套（卡片描边 tint-200 + shadow 字段双端一致、结构页弃渐变改纯色主底+色阶大圆+onPrimary 装饰条+封面重心居中、icon-list 明暗感知色阶圆片）。总单测 96→110 项 |
+| 0.14.0 | **模型档位 weak/strong——强模型升级（借鉴 genoffice 的强模型直写页面 spec + 事后审计模式）**：新增正交旋钮 `brief.modelProfile`——strong 档：elements 手写精细版式升为主路径（content 保留为快路径）、未显式指定 mode 时默认 quick、弱模型辅助闩锁不自动开启、熔断阈值 5→8（按 deck 档位分档，报错提示同步）；**elements 表达面扩充**：形状 9→16 种（hexagon/parallelogram/trapezoid/leftArrow/upArrow/downArrow/star5，OOXML 预设 + HTML clip-path 双端一致）、shape/image 新增 `rotation`（-180~180 装饰旋转）；**排版纪律移植进工具描述与 SKILL**（文字容量自估公式 / 间距下限 / 反 AI 味铁律 / 内容铺满画布）；**成功路径回审计摘要**（全过 ✅、版面类 warning 点名建议当页即改）。deepRepair 容错保留但冻结扩展。校验规则/令牌/红线/状态机零改动。新增 tests/model-profile.test.ts（8 项，总 96 项） |
 
-当前：**20 个工具、12 套主题（6 类分类）、17 种页型、10 种信息结构、40 条校验规则、57 项单测**。
+当前：**20 个工具、12 套主题（6 类分类 + 色阶 + 纹理令牌）、17 种页型、10 种信息结构、44 条校验规则、196 项单测**（0.23.0：图示 8 种 + 自审回放校准；0.22.0：像素自审 + 预览懒注册；0.21.0：就地编辑/主题导入/形状 26/动画目录；0.18.0：图标包 83 + 背景纹理 + 品牌取色；0.17.0：layout 词表 + illustration 图示 + 扉页扩容；0.16.0：槽位契约 + 空容器 + visualStyle）。
 回归入口：`npm run build && npm test && npm run demo`（demo 端到端走完阶段 0–8，含设计预设、即时预览、修改循环演示；`npm test` 走插件本地 vitest 配置，只跑本插件 tests/）。
